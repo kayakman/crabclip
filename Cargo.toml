@@ -1,0 +1,16 @@
+[package]
+name = "cliprust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3 = "1.8.7"
+chrono = "0.4.45"
+dispatch2 = "0.3.1"
+global-hotkey = "0.10.0"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+plist = "1.10.4"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+zstd = "0.14.4"
