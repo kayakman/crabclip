@@ -68,13 +68,16 @@ fn find<'a>(reps: &'a [Rep], uti: &str) -> Option<&'a Rep> {
 }
 
 pub fn percent_decode(s: &str) -> String {
+    fn hex(c: u8) -> Option<u8> {
+        (c as char).to_digit(16).map(|d| d as u8)
+    }
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h << 4 | l);
                 i += 3;
                 continue;
             }
@@ -194,9 +197,13 @@ fn kind_of(text: Option<&str>, has_image: bool, files: &[String], reps: &[Rep]) 
 
 /// Build the clip to store. Returns None when there is nothing worth keeping.
 pub fn build(c: Capture, s: &Settings) -> Option<NewClip> {
+    // Marker types are often empty: check them before dropping empty data.
+    if c.reps.iter().any(|r| SKIP_MARKERS.contains(&r.uti.as_str())) {
+        return None;
+    }
     let mut reps = drop_legacy(c.reps);
     reps.retain(|r| !r.data.is_empty());
-    if reps.is_empty() || reps.iter().any(|r| SKIP_MARKERS.contains(&r.uti.as_str())) {
+    if reps.is_empty() {
         return None;
     }
     let files = file_paths(&reps);

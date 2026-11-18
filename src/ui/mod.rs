@@ -89,6 +89,7 @@ pub struct App {
     app_filter: RefCell<Option<String>>,
     hotkey: RefCell<Option<(GlobalHotKeyManager, Option<HotKey>)>>,
     pasting: Cell<bool>,
+    modal: Cell<bool>,
     last_hide: Cell<Option<Instant>>,
     last_prune: Cell<Option<Instant>>,
     seen_apps: RefCell<HashSet<String>>,
@@ -114,7 +115,7 @@ pub fn run() {
                 .count()
         };
         if others() > 0 {
-            let is_agent = std::env::var("XPC_SERVICE_NAME").is_ok_and(|v| v == AGENT_LABEL);
+            let is_agent = running_as_agent() || std::env::args().any(|a| a == "--takeover");
             let name = if is_agent { QUIT_NOTIFICATION } else { SHOW_NOTIFICATION };
             post_distributed(name);
             if !is_agent {
@@ -168,6 +169,7 @@ fn start(handler: &Handler) {
         app_filter: RefCell::new(None),
         hotkey: RefCell::new(None),
         pasting: Cell::new(false),
+        modal: Cell::new(false),
         last_hide: Cell::new(None),
         last_prune: Cell::new(None),
         seen_apps: RefCell::new(HashSet::new()),
@@ -218,8 +220,9 @@ fn start(handler: &Handler) {
     }
 
     let installed = NSBundle::mainBundle().bundlePath().to_string().starts_with("/Applications/");
-    if a.settings.borrow().launch_at_login && installed && !crate::login::is_enabled() {
-        if let Err(e) = crate::login::set_enabled(true) {
+    let want_login = a.settings.borrow().launch_at_login;
+    if installed && want_login != crate::login::is_enabled() && !(running_as_agent() && !want_login) {
+        if let Err(e) = crate::login::set_enabled(want_login) {
             log!("login item: {e}");
         }
     }
@@ -705,6 +708,14 @@ impl App {
         if p.isVisible() {
             p.orderOut(None);
             self.last_hide.set(Some(Instant::now()));
+            // We may have activated ourselves (alerts): hand focus back unless
+            // another of our windows (Preferences) is in use.
+            let nsapp = NSApplication::sharedApplication(self.mtm);
+            if nsapp.isActive() && !self.pasting.get() && nsapp.keyWindow().is_none() {
+                if let Some(prev) = self.prev_app.borrow().as_ref() {
+                    prev.activateWithOptions(NSApplicationActivationOptions::empty());
+                }
+            }
         }
     }
 
@@ -713,7 +724,7 @@ impl App {
         let is_panel = n
             .object()
             .is_some_and(|o| std::ptr::eq(&*o as *const AnyObject, &*ui.panel as *const ClipPanel as *const AnyObject));
-        if is_panel && !self.settings.borrow().pinned && !self.pasting.get() {
+        if is_panel && !self.settings.borrow().pinned && !self.pasting.get() && !self.modal.get() {
             self.hide();
         }
     }
@@ -954,7 +965,7 @@ impl App {
                 self.copy_selected();
                 true
             }
-            "\u{7f}" | "\u{8}" => {
+            "\u{7f}" | "\u{8}" if table_focused => {
                 self.delete_selected();
                 true
             }
@@ -1005,6 +1016,14 @@ impl App {
                 ui.panel.makeFirstResponder(Some(&ui.search));
                 return true;
             }
+            116 | 121 => {
+                self.move_selection(if code == 116 { -10 } else { 10 });
+                return true;
+            }
+            115 | 119 => {
+                self.select_row(if code == 115 { 0 } else { isize::MAX / 2 });
+                return true;
+            }
             _ => {}
         }
         let chars = ev.characters().map(|s| s.to_string()).unwrap_or_default();
@@ -1039,14 +1058,8 @@ impl App {
         }
     }
 
-    pub fn text_changed(&self, n: &NSNotification) {
-        let ui = self.ui();
-        let from_search = n
-            .object()
-            .is_some_and(|o| std::ptr::eq(&*o as *const AnyObject, &*ui.search as *const NSSearchField as *const AnyObject));
-        if from_search {
-            self.run_search(true);
-        }
+    pub fn text_changed(&self, _n: &NSNotification) {
+        // The search field's own action (sent on every keystroke) runs the query.
     }
 
     pub fn search_command(&self, control: &NSControl, sel: Sel) -> bool {
@@ -1079,15 +1092,26 @@ impl App {
 
     // ------------------------------------------------------------ gear menu
 
+    /// Modal confirmation. The panel stays up meanwhile and gets the keyboard
+    /// back afterwards (closing it then returns focus to the previous app).
     pub fn confirm(&self, title: &str, text: &str, ok: &str) -> bool {
         let nsapp = NSApplication::sharedApplication(self.mtm);
+        let panel_up = self.ui().panel.isVisible();
+        self.modal.set(true);
         nsapp.activate();
         let alert = NSAlert::new(self.mtm);
         alert.setMessageText(&NSString::from_str(title));
         alert.setInformativeText(&NSString::from_str(text));
         alert.addButtonWithTitle(&NSString::from_str(ok));
-        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-        alert.runModal() == NSAlertFirstButtonReturn
+        if ok != "OK" {
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        }
+        let yes = alert.runModal() == NSAlertFirstButtonReturn;
+        self.modal.set(false);
+        if panel_up {
+            self.ui().panel.makeKeyAndOrderFront(None);
+        }
+        yes
     }
 
     pub fn clear_history(&self, tag: isize) {
@@ -1146,6 +1170,10 @@ unsafe extern "C" {
 
 fn beep() {
     unsafe { ns_beep() }
+}
+
+pub fn running_as_agent() -> bool {
+    std::env::var("XPC_SERVICE_NAME").is_ok_and(|v| v == AGENT_LABEL)
 }
 
 fn post_distributed(name: &str) {

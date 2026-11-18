@@ -57,9 +57,19 @@ fn ingest_loop(path: PathBuf, rx: Receiver<Job>, notify: Notify, ocr: Sender<()>
         }
     };
     while let Ok(job) = rx.recv() {
+        // A bug in one clip must never stop recording: contain panics per job.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(&db, job, &notify, &ocr)));
+        if r.is_err() {
+            crate::log!("ingest: job panicked, continuing");
+        }
+    }
+}
+
+fn run_job(db: &Db, job: Job, notify: &Notify, ocr: &Sender<()>) {
+    {
         objc2::rc::autoreleasepool(|_| match job {
             Job::Capture(cap) => {
-                let s = Settings::load(&db);
+                let s = Settings::load(db);
                 let t0 = std::time::Instant::now();
                 let Some(clip) = crate::ingest::build(cap, &s) else { return };
                 let kind = clip.kind;
@@ -88,7 +98,7 @@ fn ingest_loop(path: PathBuf, rx: Receiver<Job>, notify: Notify, ocr: Sender<()>
                 }
             }
             Job::Prune => {
-                let s = Settings::load(&db);
+                let s = Settings::load(db);
                 if s.keep_days > 0 {
                     let before = crate::timefmt::now_ms() - s.keep_days as i64 * 86_400_000;
                     match db.clear(Some(before), false) {
@@ -130,7 +140,7 @@ fn ocr_loop(path: PathBuf, wake: Receiver<()>, notify: Notify) {
             }
         }
         for id in pending {
-            objc2::rc::autoreleasepool(|_| {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| objc2::rc::autoreleasepool(|_| {
                 let types = db.rep_types(id).unwrap_or_default();
                 let uti = crate::ingest::IMAGE_TYPES
                     .iter()
@@ -148,7 +158,11 @@ fn ocr_loop(path: PathBuf, wake: Receiver<()>, notify: Notify) {
                     }
                 };
                 notify(Event::Ocr(id));
-            });
+            })));
+            if r.is_err() {
+                crate::log!("ocr: clip {id} panicked");
+                let _ = db.set_ocr(id, None, 2);
+            }
         }
     }
 }

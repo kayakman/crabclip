@@ -294,11 +294,39 @@ pub fn changed(_sender: Option<&AnyObject>) {
     if old == new {
         return;
     }
+    if new.keep_days > 0 && new.keep_days != old.keep_days && (old.keep_days == 0 || new.keep_days < old.keep_days) {
+        let before = timefmt::now_ms() - new.keep_days as i64 * 86_400_000;
+        let n: i64 = a
+            .db
+            .conn
+            .query_row("SELECT COUNT(*) FROM clips WHERE starred=0 AND copied_at < ?", [before], |r| r.get(0))
+            .unwrap_or(0);
+        if n > 0
+            && !a.confirm(
+                &format!("Delete {n} clips older than {} days?", new.keep_days),
+                "Unstarred clips older than that are removed now and from then on. Starred clips are kept.",
+                "Delete",
+            )
+        {
+            PREFS.with(|p| {
+                if let Some(p) = p.borrow().as_ref() {
+                    let idx = KEEP.iter().position(|(v, _)| *v == old.keep_days).unwrap_or(0);
+                    p.keep.selectItemAtIndex(idx as isize);
+                }
+            });
+            return;
+        }
+    }
     new.save(&a.db);
     *a.settings.borrow_mut() = new.clone();
     log!("prefs: saved");
     if old.launch_at_login != new.launch_at_login {
-        if let Err(e) = crate::login::set_enabled(new.launch_at_login) {
+        if !new.launch_at_login && super::running_as_agent() {
+            // Unregistering the agent would kill this very process: start a
+            // plain copy that takes over and unregisters it on launch.
+            let bundle = objc2_foundation::NSBundle::mainBundle().bundlePath().to_string();
+            let _ = std::process::Command::new("/usr/bin/open").args(["-n", &bundle, "--args", "--takeover"]).spawn();
+        } else if let Err(e) = crate::login::set_enabled(new.launch_at_login) {
             log!("login item: {e}");
         }
     }

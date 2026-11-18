@@ -35,9 +35,8 @@ bundle:
 	codesign --force --options runtime --timestamp=none --sign "$(SIGN_ID)" $(OUT)
 	codesign --verify --strict $(OUT) && echo "built $(OUT)"
 
-run: build ## Build and run from build/ (quits a running copy first)
-	-@pkill -x $(APP); sleep 1
-	open $(OUT)
+run: build ## Build and run from build/ (takes over from a running copy, which quits cleanly)
+	open -n $(OUT) --args --takeover
 
 test: ## Run the test suite
 	cargo test

@@ -267,24 +267,54 @@ impl Db {
         Ok(Db { conn, path })
     }
 
-    /// Insert a clip, or when the same content already exists bump it to the top
-    /// (refreshing its representations and source with the latest copy).
+    /// Insert a clip, or when the same content already exists bump it to the top.
+    /// A repeat copy only replaces the stored representations when it carries at
+    /// least as many types (a plain-text re-copy never strips RTF/HTML/app data).
+    /// Compression happens before the write lock is taken; the transaction is
+    /// IMMEDIATE so a concurrent writer makes us wait (busy_timeout) instead of
+    /// failing, and SQLITE_BUSY is retried.
     pub fn insert(&self, c: &NewClip, level: i32) -> Result<Inserted> {
-        let tx = self.conn.unchecked_transaction()?;
-        let existing: Option<(i64, i64)> = tx
-            .query_row("SELECT id, copied_at FROM clips WHERE hash=?", [&c.hash], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+        let reps: Vec<(i64, &str, i64, i64, Vec<u8>)> = c
+            .reps
+            .iter()
+            .map(|r| {
+                let (codec, data) = compress(&r.data, level);
+                (r.item, r.uti.as_str(), codec, r.data.len() as i64, data)
+            })
+            .collect();
+        let text_z = c.text.as_ref().map(|t| zstd::bulk::compress(t.as_bytes(), level.max(3)).unwrap_or_default());
+        let mut tries = 0;
+        loop {
+            match self.insert_tx(c, &reps, text_z.as_deref()) {
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                        && tries < 8 =>
+                {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                r => return r,
+            }
+        }
+    }
+
+    fn insert_tx(&self, c: &NewClip, reps: &[(i64, &str, i64, i64, Vec<u8>)], text_z: Option<&[u8]>) -> Result<Inserted> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        let raw: i64 = reps.iter().map(|r| r.3).sum();
+        let stored: i64 = reps.iter().map(|r| r.4.len() as i64).sum();
+        let text_len = c.text.as_ref().map(|t| t.len() as i64).unwrap_or(0);
+        let existing: Option<(i64, i64, String)> = tx
+            .query_row("SELECT id, copied_at, types FROM clips WHERE hash=?", [&c.hash], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .optional()?;
 
-        if let Some((id, copied_at)) = existing {
+        if let Some((id, copied_at, old_types)) = existing {
             if c.ts >= copied_at {
-                let (raw, stored) = self.write_reps(&tx, id, &c.reps, level, true)?;
                 tx.execute(
                     "UPDATE clips SET copied_at=?2, copy_count=copy_count+1, \
                      starred=MAX(starred, ?3), app_bundle=?4, app_name=?5, app_path=?6, \
-                     window_title=?7, source_path=?8, source_url=COALESCE(?9, source_url), \
-                     types=?10, raw_size=?11, stored_size=?12 WHERE id=?1",
+                     window_title=?7, source_path=?8, source_url=COALESCE(?9, source_url) WHERE id=?1",
                     params![
                         id,
                         c.ts,
@@ -294,12 +324,19 @@ impl Db {
                         c.app.path,
                         c.window_title,
                         c.source_path,
-                        c.source_url,
-                        c.types,
-                        raw,
-                        stored
+                        c.source_url
                     ],
                 )?;
+                let old_n = old_types.split(',').filter(|t| !t.is_empty()).count();
+                let new_n = c.types.split(',').filter(|t| !t.is_empty()).count();
+                if new_n >= old_n {
+                    Self::write_reps(&tx, id, reps, true)?;
+                    tx.execute(
+                        "UPDATE clips SET types=?2, raw_size=?3, stored_size=?4, preview=?5, \
+                         text_z=?6, text_len=?7 WHERE id=?1",
+                        params![id, c.types, raw, stored, c.preview, text_z, text_len],
+                    )?;
+                }
             } else {
                 tx.execute(
                     "UPDATE clips SET copy_count=copy_count+1, starred=MAX(starred, ?2), \
@@ -312,20 +349,13 @@ impl Db {
             return Ok(Inserted::Existing(id));
         }
 
-        let (text_z, text_len) = match &c.text {
-            Some(t) => (
-                Some(zstd::bulk::compress(t.as_bytes(), level.max(3)).unwrap_or_default()),
-                t.len() as i64,
-            ),
-            None => (None, 0),
-        };
         let (w, h, scale) = c.img.unwrap_or((0, 0, 1.0));
         let ocr_state = if c.kind == Kind::Image { 0 } else { 1 };
         tx.execute(
             "INSERT INTO clips(created_at, copied_at, kind, hash, preview, text_z, text_len, \
              starred, app_bundle, app_name, app_path, window_title, source_path, source_url, \
-             img_w, img_h, img_scale, thumb, ocr_state, types) \
-             VALUES(?1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+             img_w, img_h, img_scale, thumb, ocr_state, types, raw_size, stored_size) \
+             VALUES(?1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 c.ts,
                 c.kind.as_str(),
@@ -345,44 +375,29 @@ impl Db {
                 if c.img.is_some() { Some(scale) } else { None },
                 c.thumb,
                 ocr_state,
-                c.types
+                c.types,
+                raw,
+                stored
             ],
         )?;
         let id = tx.last_insert_rowid();
-        let (raw, stored) = self.write_reps(&tx, id, &c.reps, level, false)?;
-        tx.execute(
-            "UPDATE clips SET raw_size=?2, stored_size=?3 WHERE id=?1",
-            params![id, raw, stored],
-        )?;
+        Self::write_reps(&tx, id, reps, false)?;
         Self::reindex(&tx, id)?;
         tx.commit()?;
         Ok(Inserted::New(id))
     }
 
-    fn write_reps(
-        &self,
-        tx: &Connection,
-        id: i64,
-        reps: &[Rep],
-        level: i32,
-        replace: bool,
-    ) -> Result<(i64, i64)> {
+    fn write_reps(tx: &Connection, id: i64, reps: &[(i64, &str, i64, i64, Vec<u8>)], replace: bool) -> Result<()> {
         if replace {
             tx.execute("DELETE FROM reps WHERE clip_id=?", [id])?;
         }
-        let mut raw = 0i64;
-        let mut stored = 0i64;
         let mut st = tx.prepare_cached(
-            "INSERT OR REPLACE INTO reps(clip_id, item, uti, codec, raw_size, data) \
-             VALUES(?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO reps(clip_id, item, uti, codec, raw_size, data) VALUES(?,?,?,?,?,?)",
         )?;
-        for r in reps {
-            let (codec, data) = compress(&r.data, level);
-            raw += r.data.len() as i64;
-            stored += data.len() as i64;
-            st.execute(params![id, r.item, r.uti, codec, r.data.len() as i64, data])?;
+        for (item, uti, codec, raw_size, data) in reps {
+            st.execute(params![id, item, uti, codec, raw_size, data])?;
         }
-        Ok((raw, stored))
+        Ok(())
     }
 
     /// Rebuild the FTS row of a clip from its stored text, OCR text and metadata.

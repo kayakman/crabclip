@@ -19,7 +19,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => cliprust::ui::run(),
-        Some(a) if a.starts_with("-psn") => cliprust::ui::run(),
+        Some(a) if a.starts_with("-psn") || a == "--takeover" => cliprust::ui::run(),
         Some("--import-collective") => {
             let db = Db::open(&Db::default_path()).expect("open db");
             let settings = Settings::load(&db);

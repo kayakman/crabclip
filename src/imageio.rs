@@ -160,23 +160,34 @@ fn encode(img: &Cf, uti: &str, quality: Option<f64>) -> Option<Vec<u8>> {
 }
 
 /// List thumbnail: the image scaled to at most `max_w` px wide, cropped to the top
-/// `max_h` px, flattened on white and JPEG encoded.
+/// `max_h` px, flattened on white and JPEG encoded. ImageIO does the downscale
+/// (and applies EXIF rotation), so huge images are never decoded at full size.
 pub fn thumbnail(data: &[u8], max_w: usize, max_h: usize) -> Option<Vec<u8>> {
+    let i = info(data)?;
+    let (w, h) = (i.width.max(1) as f64, i.height.max(1) as f64);
+    let scale = (max_w as f64 / w).min(1.0);
+    // Longest side after scaling to the target width; very tall images are
+    // capped (their top part is all the list shows anyway).
+    let max_px = (w.max(h) * scale).ceil().clamp(1.0, 4096.0);
     let (src, _keep) = source(data)?;
     unsafe {
-        let img = full_image(&src)?;
-        let (w, h) = (CGImageGetWidth(img.0), CGImageGetHeight(img.0));
-        if w == 0 || h == 0 {
+        let o = opts(&[
+            (kCGImageSourceThumbnailMaxPixelSize, num_obj(max_px)),
+            (kCGImageSourceCreateThumbnailFromImageAlways, bool_obj(true)),
+            (kCGImageSourceCreateThumbnailWithTransform, bool_obj(true)),
+        ]);
+        let img = Cf::new(CGImageSourceCreateThumbnailAtIndex(src.0, 0, ns_ptr(&*o)))?;
+        let (iw, ih) = (CGImageGetWidth(img.0), CGImageGetHeight(img.0));
+        if iw == 0 || ih == 0 {
             return None;
         }
-        let tw = w.min(max_w);
-        let scale = tw as f64 / w as f64;
-        let th = ((h as f64 * scale).round() as usize).clamp(1, max_h);
-        // Source rows that end up in the thumbnail (top crop), in image pixels.
-        let src_h = ((th as f64 / scale).round() as usize).clamp(1, h);
+        let tw = iw.min(max_w);
+        let k = tw as f64 / iw as f64;
+        let th = ((ih as f64 * k).round() as usize).clamp(1, max_h);
+        let src_h = ((th as f64 / k).round() as usize).clamp(1, ih);
         let cropped = Cf::new(CGImageCreateWithImageInRect(
             img.0,
-            CGRect { x: 0.0, y: 0.0, w: w as f64, h: src_h as f64 },
+            CGRect { x: 0.0, y: 0.0, w: iw as f64, h: src_h as f64 },
         ))?;
         let space = Cf::new(CGColorSpaceCreateDeviceRGB())?;
         // kCGImageAlphaPremultipliedLast = 1

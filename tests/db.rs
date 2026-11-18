@@ -88,11 +88,38 @@ fn files_and_skips() {
         reps: vec![
             Rep { item: 0, uti: "public.utf8-plain-text".into(), data: b"hunter2".to_vec() },
             Rep { item: 0, uti: "org.nspasteboard.ConcealedType".into(), data: b"".to_vec() },
-            Rep { item: 0, uti: "com.agilebits.onepassword".into(), data: b"x".to_vec() },
         ],
         ..Default::default()
     };
     assert!(build(secret, &s).is_none());
+}
+
+#[test]
+fn odd_file_urls_do_not_panic() {
+    use cliprust::ingest::{file_url_to_path, percent_decode};
+    assert_eq!(percent_decode("a%a\u{20ac}b%2"), "a%a\u{20ac}b%2");
+    assert_eq!(percent_decode("%E2%82%AC%20x"), "\u{20ac} x");
+    assert_eq!(file_url_to_path("file:///tmp/x%a\u{20ac}.txt").as_deref(), Some("/tmp/x%a\u{20ac}.txt"));
+}
+
+#[test]
+fn recopy_never_strips_rich_formats() {
+    let db = Db::open_memory().unwrap();
+    let s = Settings::default();
+    let rich = Capture {
+        ts: 10,
+        reps: vec![
+            Rep { item: 0, uti: "public.utf8-plain-text".into(), data: b"hello rich".to_vec() },
+            Rep { item: 0, uti: "public.rtf".into(), data: b"{\\rtf1 hello rich}".to_vec() },
+        ],
+        ..Default::default()
+    };
+    let id = db.insert(&build(rich, &s).unwrap(), 3).unwrap().id();
+    let plain = text_capture(20, "hello rich", "Terminal");
+    assert_eq!(db.insert(&build(plain, &s).unwrap(), 3).unwrap(), Inserted::Existing(id));
+    assert_eq!(db.reps(id).unwrap().len(), 2, "rtf kept");
+    assert_eq!(db.search(&Filter { query: "", starred: false, app: None }, 5).unwrap(), vec![id]);
+    assert_eq!(db.detail(id).unwrap().unwrap().app_name.as_deref(), Some("Terminal"));
 }
 
 #[test]
@@ -122,4 +149,22 @@ fn image_thumbnail_and_dims() {
     let id = db.insert(&clip, 3).unwrap().id();
     assert_eq!(db.reps(id).unwrap()[0].data, png, "image bytes come back as-is");
     assert_eq!(db.pending_ocr(10).unwrap(), vec![id]);
+}
+
+#[test]
+fn insert_waits_for_a_concurrent_writer() {
+    let dir = std::env::temp_dir().join(format!("cliprust-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("busy.db");
+    let a = Db::open(&path).unwrap();
+    let b = Db::open(&path).unwrap();
+    a.conn.execute_batch("BEGIN IMMEDIATE; UPDATE settings SET value=value;").unwrap();
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        a.conn.execute_batch("COMMIT").unwrap();
+    });
+    let clip = build(text_capture(1, "while locked", "x"), &Settings::default()).unwrap();
+    assert!(matches!(b.insert(&clip, 3).unwrap(), Inserted::New(_)));
+    t.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
