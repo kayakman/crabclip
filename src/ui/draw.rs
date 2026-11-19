@@ -81,7 +81,7 @@ pub fn row(v: &RowView) {
 
     let content = NSRect::new(NSPoint::new(LEFT, 5.0), NSSize::new((w - LEFT - RIGHT).max(10.0), h - 10.0));
     let fg = if sel { NSColor::alternateSelectedControlTextColor() } else { NSColor::labelColor() };
-    let font = NSFont::systemFontOfSize(13.0);
+    let font = NSFont::systemFontOfSize(a.settings.borrow().font_size);
 
     match d.info.kind {
         Kind::Image => {

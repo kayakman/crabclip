@@ -23,6 +23,7 @@ history on crashes).
 | ⌘1…⌘9 | paste the nth clip |
 | ⌘C / ⌘⏎ | copy to the clipboard without pasting |
 | ⌫ | delete clip |
+| → ← | open / fold the preview pane (or click its button, top right) |
 | ⌘P | pin (window stays open) |
 | Esc | clear search, then close |
 | ⌘, | preferences |
@@ -30,6 +31,9 @@ history on crashes).
 Search: words match anywhere (text, OCR text, app, window title, path, URL;
 case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,
 `app:chrome`, `type:image|text|url|file`, `is:star`.
+
+Preferences also set the text size and an interface size slider (75–200%)
+that zooms the whole window: text, rows, icons and the window itself.
 
 ## Build
 

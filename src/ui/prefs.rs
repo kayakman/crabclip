@@ -7,7 +7,7 @@ use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSPopUpButton, NSTextAlignment, NSTextField, NSView, NSWindow,
+    NSControlStateValueOn, NSFont, NSPopUpButton, NSSlider, NSTextAlignment, NSTextField, NSView, NSWindow,
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL};
@@ -19,6 +19,7 @@ const OPEN_AT: &[(&str, &str)] = &[
     ("mouse", "At the mouse pointer"),
 ];
 const ROWS: &[(f64, &str)] = &[(52.0, "Compact"), (72.0, "Normal"), (96.0, "Large"), (128.0, "Huge")];
+const FONTS: &[f64] = &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0];
 const ZSTD: &[(i32, &str)] = &[(3, "Fast (zstd 3)"), (9, "Balanced (zstd 9)"), (19, "Smallest (zstd 19)")];
 const KEEP: &[(u32, &str)] = &[(0, "Forever"), (365, "1 year"), (180, "6 months"), (90, "90 days"), (30, "30 days")];
 
@@ -30,6 +31,9 @@ struct Prefs {
     move_top: Retained<NSButton>,
     ocr: Retained<NSButton>,
     rows: Retained<NSPopUpButton>,
+    font: Retained<NSPopUpButton>,
+    scale: Retained<NSSlider>,
+    scale_label: Retained<NSTextField>,
     img_pct: Retained<NSTextField>,
     img_mp: Retained<NSTextField>,
     zstd: Retained<NSPopUpButton>,
@@ -141,7 +145,7 @@ pub fn show() {
         return;
     }
     let s = a.settings.borrow().clone();
-    let (w, h) = (580.0, 640.0);
+    let (w, h) = (580.0, 730.0);
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -171,6 +175,24 @@ pub fn show() {
     let open_at = f.popup("Open window at:", &OPEN_AT.iter().map(|(_, t)| *t).collect::<Vec<_>>(), open_idx);
     let row_idx = ROWS.iter().position(|(v, _)| (*v - s.row_height).abs() < 1.0).unwrap_or(1);
     let rows = f.popup("Row size:", &ROWS.iter().map(|(_, t)| *t).collect::<Vec<_>>(), row_idx);
+    let font_idx = FONTS.iter().position(|v| (*v - s.font_size).abs() < 0.5).unwrap_or(2);
+    let font_titles: Vec<String> = FONTS.iter().map(|v| if *v == 13.0 { format!("{v} pt (default)") } else { format!("{v} pt") }).collect();
+    let font = f.popup("Text size:", &font_titles.iter().map(|t| t.as_str()).collect::<Vec<_>>(), font_idx);
+
+    f.label("Interface size:");
+    let scale = unsafe {
+        NSSlider::sliderWithValue_minValue_maxValue_target_action(s.ui_scale, 75.0, 200.0, Some(target), Some(sel!(prefChanged:)), mtm)
+    };
+    scale.setFrame(rect(220.0, f.y, 230.0, 24.0));
+    scale.setNumberOfTickMarks(6);
+    scale.setAllowsTickMarkValuesOnly(true);
+    scale.setContinuous(false);
+    view.addSubview(&scale);
+    let scale_label = NSTextField::labelWithString(&ns(&format!("{}%", s.ui_scale)), mtm);
+    scale_label.setFrame(rect(458.0, f.y + 3.0, 60.0, 18.0));
+    view.addSubview(&scale_label);
+    f.y -= 30.0;
+    f.note("Zooms the whole window: text, rows, icons and its size.");
 
     f.label("General:");
     let login = f.check("Launch at login (restarts if it ever crashes)", s.launch_at_login);
@@ -225,6 +247,9 @@ pub fn show() {
             move_top,
             ocr,
             rows,
+            font,
+            scale,
+            scale_label,
             img_pct,
             img_mp,
             zstd,
@@ -269,6 +294,9 @@ pub fn changed(_sender: Option<&AnyObject>) {
         let mut s = old.clone();
         s.open_at = OPEN_AT.get(p.open_at.indexOfSelectedItem().max(0) as usize).map(|x| x.0).unwrap_or("last").into();
         s.row_height = ROWS.get(p.rows.indexOfSelectedItem().max(0) as usize).map(|x| x.0).unwrap_or(72.0);
+        s.font_size = FONTS.get(p.font.indexOfSelectedItem().max(0) as usize).copied().unwrap_or(13.0);
+        s.ui_scale = (p.scale.doubleValue() / 25.0).round() * 25.0;
+        p.scale_label.setStringValue(&ns(&format!("{}%", s.ui_scale)));
         s.launch_at_login = on(&p.login);
         s.move_to_top = on(&p.move_top);
         s.ocr = on(&p.ocr);
@@ -334,6 +362,13 @@ pub fn changed(_sender: Option<&AnyObject>) {
         a.apply_buttons();
         a.invalidate_all();
         a.ui().table.reloadData();
+    }
+    if old.font_size != new.font_size {
+        a.ui().table.reloadData();
+        a.update_preview();
+    }
+    if old.ui_scale != new.ui_scale {
+        a.rescale_window(old.ui_scale);
     }
     if old.keep_days != new.keep_days {
         let _ = a.jobs.send(crate::worker::Job::Prune);

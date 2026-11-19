@@ -18,8 +18,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
-const TOP: f64 = 38.0;
-const BOTTOM: f64 = 28.0;
+pub const TOP: f64 = 38.0;
+pub const BOTTOM: f64 = 28.0;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
@@ -173,6 +173,11 @@ pub fn build(a: &App) -> Ui {
     fx.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     fx.setState(NSVisualEffectState::Active);
     panel.setContentView(Some(&fx));
+    // Everything sits in `zoom`, whose bounds are its frame divided by the
+    // interface size: App::apply_scale lays it out (no autoresizing here).
+    let zoom = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, hgt));
+    zoom.setAutoresizesSubviews(false);
+    fx.addSubview(&zoom);
 
     // ---- top bar
     let top = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, hgt - TOP, w, TOP));
@@ -190,7 +195,7 @@ pub fn build(a: &App) -> Ui {
     top.addSubview(&app_popup);
     let star_btn = icon_button(mtm, rect(218.0, cy, 28.0, 24.0), "star", "Starred only (S)", h, sel!(toggleStarFilter:));
     top.addSubview(&star_btn);
-    let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), rect(252.0, cy, w - 252.0 - 42.0, 24.0));
+    let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), rect(252.0, cy, w - 252.0 - 72.0, 24.0));
     search.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     search.setPlaceholderString(Some(&ns("Search  (⌘F)")));
     unsafe { search.setDelegate(Some(ProtocolObject::from_ref(&*a.handler))) };
@@ -201,10 +206,13 @@ pub fn build(a: &App) -> Ui {
     search.setSendsSearchStringImmediately(true);
     search.setFocusRingType(NSFocusRingType::None);
     top.addSubview(&search);
+    let preview_btn = icon_button(mtm, rect(w - 66.0, cy, 28.0, 24.0), "sidebar.right", "Hide preview (←)", h, sel!(togglePreview:));
+    preview_btn.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+    top.addSubview(&preview_btn);
     let pin_btn = icon_button(mtm, rect(w - 36.0, cy, 28.0, 24.0), "pin", "Pin window open (⌘P)", h, sel!(togglePin:));
     pin_btn.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
     top.addSubview(&pin_btn);
-    fx.addSubview(&top);
+    zoom.addSubview(&top);
 
     // ---- split: list | preview
     let split = NSSplitView::initWithFrame(NSSplitView::alloc(mtm), rect(0.0, BOTTOM, w, hgt - TOP - BOTTOM));
@@ -283,7 +291,7 @@ pub fn build(a: &App) -> Ui {
     split.addSubview(&preview);
     split.setAutosaveName(Some(&ns("cliprust.split")));
     split.adjustSubviews();
-    fx.addSubview(&split);
+    zoom.addSubview(&split);
 
     // ---- bottom bar
     let bottom = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, BOTTOM));
@@ -302,13 +310,12 @@ pub fn build(a: &App) -> Ui {
     count_label.setTextColor(Some(&NSColor::tertiaryLabelColor()));
     count_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
     bottom.addSubview(&count_label);
-    fx.addSubview(&bottom);
+    zoom.addSubview(&bottom);
 
     // ---- status item
     let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
     if let Some(btn) = status_item.button(mtm) {
         btn.setImage(status_image().as_deref());
-        btn.setToolTip(Some(&ns("cliprust — ⌘⌥V")));
         unsafe {
             btn.setTarget(Some(h));
             btn.setAction(Some(sel!(statusClicked:)));
@@ -332,6 +339,13 @@ pub fn build(a: &App) -> Ui {
         app_popup,
         star_btn,
         pin_btn,
+        preview_btn,
+        split,
+        list: scroll,
+        preview,
+        zoom,
+        top_bar: top,
+        bottom_bar: bottom,
         date_label,
         count_label,
         text_scroll,

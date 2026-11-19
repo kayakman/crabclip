@@ -23,11 +23,11 @@ use objc2_app_kit::{
     NSApplicationActivationPolicy, NSAttributedStringAppKitDocumentFormats, NSButton, NSColor,
     NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSImage, NSImageView,
     NSMenu, NSPasteboard, NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView,
-    NSSearchField, NSStatusItem, NSTableView, NSTextField, NSTextView, NSUserInterfaceItemIdentification, NSView, NSWorkspace,
+    NSSearchField, NSSplitView, NSStatusItem, NSTableView, NSTextField, NSTextView, NSUserInterfaceItemIdentification, NSView, NSWorkspace,
 };
 use objc2_foundation::{
     NSAttributedString, NSBundle, NSData, NSDistributedNotificationCenter, NSIndexSet,
-    NSNotification, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSString,
+    NSNotification, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSRunLoopCommonModes, NSString,
     NSTimer, NSUserDefaults,
 };
 use std::cell::{Cell, OnceCell, RefCell};
@@ -63,6 +63,13 @@ pub struct Ui {
     pub app_popup: Retained<NSPopUpButton>,
     pub star_btn: Retained<NSButton>,
     pub pin_btn: Retained<NSButton>,
+    pub preview_btn: Retained<NSButton>,
+    pub split: Retained<NSSplitView>,
+    pub list: Retained<NSScrollView>,
+    pub preview: Retained<NSView>,
+    pub zoom: Retained<NSView>,
+    pub top_bar: Retained<NSView>,
+    pub bottom_bar: Retained<NSView>,
     pub date_label: Retained<NSTextField>,
     pub count_label: Retained<NSTextField>,
     pub text_scroll: Retained<NSScrollView>,
@@ -185,6 +192,8 @@ fn start(handler: &Handler) {
     let ui = build::build(a);
     let _ = a.ui.set(ui);
     a.apply_buttons();
+    a.apply_scale();
+    a.apply_preview();
 
     if let Ok(out) = std::env::var("CLIPRUST_SNAPSHOT") {
         a.snapshot(&out);
@@ -251,6 +260,20 @@ impl App {
         let row: isize = std::env::var("CLIPRUST_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
         self.select_row(row);
         self.update_preview();
+        if std::env::var("CLIPRUST_SNAPSHOT_LIVE").is_ok() {
+            // Real compositing, far off every screen and never key: nothing
+            // shows and no keystroke can land in it.
+            let mut f = ui.panel.frame();
+            f.origin = NSPoint::new(-30000.0, -30000.0);
+            ui.panel.setFrame_display(f, true);
+            ui.panel.orderFrontRegardless();
+            NSRunLoop::currentRunLoop().runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.8));
+            let n = ui.panel.windowNumber().to_string();
+            let _ = std::process::Command::new("/usr/sbin/screencapture").args(["-x", "-o", "-l", &n, out]).status();
+            ui.panel.orderOut(None);
+            log!("live snapshot of window {n} written to {out}");
+            return;
+        }
         let Some(view) = ui.panel.contentView() else { return };
         view.layoutSubtreeIfNeeded();
         ui.table.tile();
@@ -286,6 +309,9 @@ impl App {
         m.register(hk).map_err(|e| format!("cannot register {spec}: {e}"))?;
         *current = Some(hk);
         log!("hotkey: {spec}");
+        if let Some(btn) = self.ui.get().and_then(|ui| ui.status_item.button(self.mtm)) {
+            btn.setToolTip(Some(&NSString::from_str(&format!("cliprust — {}", hotkey_label(&spec)))));
+        }
         Ok(())
     }
 
@@ -581,13 +607,16 @@ impl App {
             ui.image_view.setImage(None);
             ui.image_view.setHidden(true);
             ui.text_scroll.setHidden(false);
-            set_text(&ui.text_view, "", false);
+            set_text(&ui.text_view, "", false, self.settings.borrow().font_size);
             ui.meta.setStringValue(&NSString::from_str(""));
             ui.date_label.setStringValue(&NSString::from_str(""));
             return;
         };
         let Ok(Some(d)) = self.db.detail(id) else { return };
         ui.date_label.setStringValue(&NSString::from_str(&timefmt::human(d.copied_at)));
+        if !self.settings.borrow().preview_open {
+            return; // filled in when the pane opens
+        }
         let mut shown_image = false;
         if d.kind == Kind::Image {
             let types = self.db.rep_types(id).unwrap_or_default();
@@ -635,7 +664,7 @@ impl App {
             _ => d.text.clone().unwrap_or_default(),
         };
         let shown: String = text.chars().take(1_000_000).collect();
-        set_text(tv, &shown, mono);
+        set_text(tv, &shown, mono, self.settings.borrow().font_size);
     }
 
     // ----------------------------------------------------------------- show
@@ -843,6 +872,77 @@ impl App {
         self.apply_buttons();
     }
 
+    /// Zooms the whole panel: `zoom`'s bounds are its frame divided by the
+    /// interface size, so every bar, row, icon and text draws bigger or smaller.
+    /// Its three bars are placed here (AppKit's autoresizing ignores the zoom);
+    /// what is inside each bar autoresizes as usual.
+    pub fn apply_scale(&self) {
+        let Some(ui) = self.ui.get() else { return };
+        let Some(content) = ui.panel.contentView() else { return };
+        let k = self.settings.borrow().ui_scale / 100.0;
+        let frame = content.bounds();
+        let (w, h) = (frame.size.width / k, frame.size.height / k);
+        ui.zoom.setFrame(frame);
+        ui.zoom.setBoundsOrigin(NSPoint::new(0.0, 0.0));
+        ui.zoom.setBoundsSize(NSSize::new(w, h));
+        let r = |y: f64, hh: f64| NSRect::new(NSPoint::new(0.0, y), NSSize::new(w, hh.max(0.0)));
+        ui.top_bar.setFrame(r(h - build::TOP, build::TOP));
+        ui.split.setFrame(r(build::BOTTOM, h - build::TOP - build::BOTTOM));
+        ui.bottom_bar.setFrame(r(0.0, build::BOTTOM));
+        ui.panel.setMinSize(NSSize::new(460.0 * k, 280.0 * k));
+    }
+
+    /// The interface size changed from `old` %: grow or shrink the window by the
+    /// same ratio, keeping its top-left corner, then re-zoom its content.
+    pub fn rescale_window(&self, old: f64) {
+        let ui = self.ui();
+        let k = self.settings.borrow().ui_scale / old;
+        let mut f = ui.panel.frame();
+        let top = f.origin.y + f.size.height;
+        f.size.width = (f.size.width * k).round();
+        f.size.height = (f.size.height * k).round();
+        f.origin.y = top - f.size.height;
+        ui.panel.setFrame_display(f, ui.panel.isVisible());
+        self.apply_scale();
+    }
+
+    pub fn set_preview_open(&self, open: bool) {
+        {
+            let mut s = self.settings.borrow_mut();
+            s.preview_open = open;
+            s.save(&self.db);
+        }
+        self.apply_preview();
+        if open {
+            self.update_preview();
+        }
+    }
+
+    /// Folds or unfolds the preview pane to match the setting. A hidden split
+    /// subview is collapsed; the divider goes back where it was on unfolding.
+    pub fn apply_preview(&self) {
+        let ui = self.ui();
+        let open = self.settings.borrow().preview_open;
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let key = NSString::from_str("cliprust.listWidth");
+        if open && ui.preview.isHidden() {
+            let total = ui.split.frame().size.width;
+            let saved = defaults.doubleForKey(&key);
+            let left = if saved > 150.0 && saved < total - 150.0 { saved } else { (total * 0.48).round() };
+            ui.preview.setHidden(false);
+            ui.split.adjustSubviews();
+            ui.split.setPosition_ofDividerAtIndex(left, 0);
+        } else if !open && !ui.preview.isHidden() {
+            defaults.setDouble_forKey(ui.list.frame().size.width, &key);
+            ui.preview.setHidden(true);
+            ui.split.adjustSubviews();
+        }
+        let (symbol, tip) = if open { ("sidebar.right", "Hide preview (←)") } else { ("sidebar.right", "Show preview (→)") };
+        let color = if open { NSColor::secondaryLabelColor() } else { NSColor::tertiaryLabelColor() };
+        ui.preview_btn.setImage(draw::tinted_symbol(symbol, &color, 14.0).as_deref());
+        ui.preview_btn.setToolTip(Some(&NSString::from_str(tip)));
+    }
+
     pub fn apply_buttons(&self) {
         let ui = self.ui();
         let (star, pin) = {
@@ -1024,6 +1124,10 @@ impl App {
                 self.select_row(if code == 115 { 0 } else { isize::MAX / 2 });
                 return true;
             }
+            123 | 124 => {
+                self.set_preview_open(code == 124);
+                return true;
+            }
             _ => {}
         }
         let chars = ev.characters().map(|s| s.to_string()).unwrap_or_default();
@@ -1191,6 +1295,25 @@ pub fn symbol(name: &str) -> Option<Retained<NSImage>> {
     NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)
 }
 
+/// "cmd+ctrl+v" → "⌘⌃V", the way menus show shortcuts.
+fn hotkey_label(spec: &str) -> String {
+    let mut mods = String::new();
+    let mut key = String::new();
+    for part in spec.split('+').map(|p| p.trim().to_lowercase()) {
+        match part.as_str() {
+            "ctrl" | "control" => mods.push('⌃'),
+            "alt" | "option" | "opt" => mods.push('⌥'),
+            "shift" => mods.push('⇧'),
+            "cmd" | "command" | "super" | "meta" => mods.push('⌘'),
+            k => key = k.trim_start_matches("key").to_uppercase(),
+        }
+    }
+    // Menus order modifiers ⌃⌥⇧⌘.
+    let mut m: Vec<char> = mods.chars().collect();
+    m.sort_by_key(|c| "⌃⌥⇧⌘".chars().position(|x| x == *c));
+    m.into_iter().collect::<String>() + &key
+}
+
 fn is_code_app(bundle: &str) -> bool {
     let b = bundle.to_lowercase();
     ["iterm", "terminal", "vscode", "zed", "xcode", "ghostty", "warp", "alacritty", "kitty", "sublime", "jetbrains", "cursor", "nova", "bbedit", "neovim"]
@@ -1198,13 +1321,13 @@ fn is_code_app(bundle: &str) -> bool {
         .any(|k| b.contains(k))
 }
 
-fn set_text(tv: &NSTextView, text: &str, mono: bool) {
+fn set_text(tv: &NSTextView, text: &str, mono: bool, size: f64) {
     tv.setDrawsBackground(false);
     tv.setString(&NSString::from_str(text));
     let font = if mono {
-        NSFont::monospacedSystemFontOfSize_weight(12.0, 0.0)
+        NSFont::monospacedSystemFontOfSize_weight(size - 1.0, 0.0)
     } else {
-        NSFont::systemFontOfSize(13.0)
+        NSFont::systemFontOfSize(size)
     };
     tv.setFont(Some(&font));
     tv.setTextColor(Some(&NSColor::labelColor()));

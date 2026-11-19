@@ -86,6 +86,11 @@ define_class!(
         fn window_did_resign_key(&self, n: &NSNotification) {
             app().window_resigned_key(n);
         }
+
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _n: &NSNotification) {
+            app().apply_scale();
+        }
     }
 
     unsafe impl NSMenuDelegate for Handler {}
@@ -114,6 +119,12 @@ define_class!(
         #[unsafe(method(togglePin:))]
         fn toggle_pin(&self, _s: Option<&AnyObject>) {
             app().toggle_pin();
+        }
+
+        #[unsafe(method(togglePreview:))]
+        fn toggle_preview(&self, _s: Option<&AnyObject>) {
+            let a = app();
+            a.set_preview_open(!a.settings.borrow().preview_open);
         }
 
         #[unsafe(method(appFilterChanged:))]
