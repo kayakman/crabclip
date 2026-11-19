@@ -35,7 +35,9 @@ Tags: shown as pills on the clip and under the preview. `url` is added to every
 link automatically. Tagging a clip `password` encrypts it (XChaCha20-Poly1305,
 key in the login Keychain): the list shows dots, the preview hides it, its text
 leaves the search index, ⏎ still copies it (marked concealed so other clipboard
-tools skip it); removing the tag stores it in the clear again. While typing in
+tools skip it); removing the tag stores it in the clear again. Sealing wipes the old copy from
+the database files (secure_delete, index rewrite, WAL checkpoint), but backups
+made before (Time Machine, APFS snapshots) still hold it. While typing in
 search, matching tags drop down: Tab or a click filters by that tag.
 
 Search: words match anywhere (text, OCR text, app, window title, path, URL;

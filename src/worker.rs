@@ -13,6 +13,8 @@ pub enum Job {
     SaveAppIcon { key: String, name: Option<String>, path: String },
     Prune,
     Vacuum,
+    /// A clip was just sealed: purge its old index entries and pages.
+    Scrub,
 }
 
 pub enum Event {
@@ -117,6 +119,11 @@ fn run_job(db: &Db, job: Job, notify: &Notify, ocr: &Sender<()>) {
                     crate::log!("vacuum: {e}");
                 }
             }
+            Job::Scrub => {
+                if let Err(e) = db.scrub() {
+                    crate::log!("scrub: {e}");
+                }
+            }
         });
     }
 }
@@ -140,6 +147,9 @@ fn ocr_loop(path: PathBuf, wake: Receiver<()>, notify: Notify) {
             }
         }
         for id in pending {
+            if db.is_sealed(id) {
+                continue; // sealed after it was queued: never read it
+            }
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| objc2::rc::autoreleasepool(|_| {
                 let types = db.rep_types(id).unwrap_or_default();
                 let uti = crate::ingest::IMAGE_TYPES

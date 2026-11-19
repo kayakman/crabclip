@@ -716,6 +716,7 @@ impl App {
 
     pub fn show(&self) {
         let ui = self.ui();
+        self.commit_tag_edit();
         self.remember_front_app();
         *self.app_filter.borrow_mut() = None;
         self.rebuild_app_popup();
@@ -773,6 +774,7 @@ impl App {
 
     pub fn hide(&self) {
         self.hide_tag_menu();
+        self.commit_tag_edit();
         let p = &self.ui().panel;
         if p.isVisible() {
             p.orderOut(None);
@@ -793,6 +795,7 @@ impl App {
     /// could leave Preferences behind the other app.
     pub fn hide_for_window(&self) {
         self.hide_tag_menu();
+        self.commit_tag_edit();
         let p = &self.ui().panel;
         if p.isVisible() {
             self.modal.set(true); // no resign-key hide meanwhile
@@ -840,17 +843,37 @@ impl App {
 
     fn write_clip(&self, id: i64, plain: bool) -> bool {
         let pb = NSPasteboard::generalPasteboard();
+        let sealed = self.db.is_sealed(id);
+        if sealed && self.db.vault(false).is_none() {
+            // Don't wipe the clipboard with nothing.
+            self.confirm(
+                "Can't decrypt this clip",
+                "The encryption key is not available: the Keychain is locked, access was denied, or it is not the key this clip was sealed with.",
+                "OK",
+            );
+            return false;
+        }
+        // Other clipboard tools (and history apps) skip concealed data.
+        let concealed = |item: i64| crate::db::Rep { item, uti: "org.nspasteboard.ConcealedType".into(), data: Vec::new() };
         let cc = if plain {
             match self.db.detail(id).ok().flatten().and_then(|d| d.text) {
+                Some(t) if sealed => {
+                    let text = crate::db::Rep { item: 0, uti: "public.utf8-plain-text".into(), data: t.into_bytes() };
+                    crate::paste::write(&pb, &[text, concealed(0)])
+                }
                 Some(t) => crate::paste::plain_text(&pb, &t),
                 None => return false,
             }
         } else {
             match self.db.reps(id) {
                 Ok(mut reps) if !reps.is_empty() => {
-                    if self.db.tags(id).unwrap_or_default().iter().any(|t| t == crate::db::PASSWORD) {
-                        // Other clipboard tools (and history apps) skip concealed data.
-                        reps.push(crate::db::Rep { item: 0, uti: "org.nspasteboard.ConcealedType".into(), data: Vec::new() });
+                    if sealed {
+                        if reps.iter().all(|r| r.data.is_empty()) {
+                            beep();
+                            return false;
+                        }
+                        let first = reps[0].item;
+                        reps.push(concealed(first));
                     }
                     crate::paste::write(&pb, &reps)
                 }
@@ -1409,13 +1432,27 @@ impl App {
             return;
         }
         self.tags_clip.set(id.unwrap_or(0));
+        f.setEnabled(id.is_some());
+        self.fill_tags(tags);
+    }
+
+    fn fill_tags(&self, tags: &[String]) {
+        let f = &self.ui().tags_field;
         let names: Vec<Retained<NSString>> = tags.iter().map(|t| NSString::from_str(t)).collect();
         let arr = objc2_foundation::NSArray::from_retained_slice(&names);
         unsafe { f.setObjectValue(Some(arr.as_ref())) };
-        f.setEnabled(id.is_some());
         let strip = &self.ui().tag_strip;
         *strip.ivars().tags.borrow_mut() = tags.to_vec();
         strip.setNeedsDisplay(true);
+    }
+
+    /// Ends an edit in the tag field (saving it) before the window goes away
+    /// or the selection is reset.
+    fn commit_tag_edit(&self) {
+        let ui = self.ui();
+        if ui.tags_field.currentEditor().is_some() {
+            ui.panel.makeFirstResponder(Some(&ui.table));
+        }
     }
 
     pub fn focus_tags(&self) {
@@ -1452,6 +1489,10 @@ impl App {
             match self.db.set_tags(id, &vals) {
                 Ok(tags) => {
                     log!("tags: clip {id} -> {}", tags.join(","));
+                    if tags.iter().any(|t| t == crate::db::PASSWORD) && !have.iter().any(|t| t == crate::db::PASSWORD) {
+                        let _ = self.jobs.send(Job::Scrub);
+                    }
+                    self.fill_tags(&tags);
                     self.invalidate(id);
                     self.reload_row_of(id);
                     if self.selected_id() == Some(id) {
@@ -1482,7 +1523,10 @@ impl App {
             self.hide_tag_menu();
             return;
         }
-        let word = text.rsplit(char::is_whitespace).next().unwrap_or("").to_lowercase();
+        let raw_word = text.rsplit(char::is_whitespace).next().unwrap_or("");
+        // Slice by the raw word: lowercasing can change byte lengths (İ, K).
+        let before = &text[..text.len() - raw_word.len()];
+        let word = raw_word.to_lowercase();
         let (prefixed, w) = match word.strip_prefix("tag:") {
             Some(rest) => (true, rest.to_string()),
             None => (false, word.clone()),
@@ -1491,7 +1535,7 @@ impl App {
             self.hide_tag_menu();
             return;
         }
-        let used = crate::query::parse(&text[..text.len() - word.len()]).tags;
+        let used = crate::query::parse(before).tags;
         let mut items = self.tag_matches(&w, 8);
         items.retain(|(t, _)| !used.contains(t) && !(prefixed && *t == w));
         items.truncate(6);
@@ -1835,6 +1879,7 @@ fn meta_text(d: &Detail) -> String {
     }
     lines.push(when);
     let mut what = match d.kind {
+        _ if d.sealed() => "Encrypted".to_string(),
         Kind::Image => format!("Image {}×{} px", d.img_w, d.img_h),
         Kind::Text | Kind::Url => {
             let t = d.text.as_deref().unwrap_or("");
@@ -1853,7 +1898,7 @@ fn meta_text(d: &Detail) -> String {
         what += " · ★";
     }
     lines.push(what);
-    if let Some(o) = &d.ocr_text {
+    if let Some(o) = d.ocr_text.as_ref().filter(|_| !d.sealed()) {
         let one: String = o.split_whitespace().collect::<Vec<_>>().join(" ");
         let short: String = one.chars().take(240).collect();
         lines.push(format!("Text in image: {short}{}", if one.chars().count() > 240 { "…" } else { "" }));

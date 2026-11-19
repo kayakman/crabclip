@@ -304,7 +304,7 @@ impl Db {
         // auto_vacuum only takes effect before the first table exists.
         conn.execute_batch(
             "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; \
-             PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+             PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         conn.execute_batch(SCHEMA)?;
         let db = Db { conn, path };
@@ -341,14 +341,9 @@ impl Db {
             })
             .collect();
         let text_z = c.text.as_ref().map(|t| zstd::bulk::compress(t.as_bytes(), level.max(3)).unwrap_or_default());
-        // A copy of a sealed secret matches it by its keyed hash.
-        let has_secrets: bool = self
-            .conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM tags WHERE tag=?)", [PASSWORD], |r| r.get(0))?;
-        let secret_hash = if has_secrets { crate::vault::get().map(|v| v.secret_hash(&c.hash)) } else { None };
         let mut tries = 0;
         loop {
-            match self.insert_tx(c, &reps, text_z.as_deref(), secret_hash.as_deref()) {
+            match self.insert_tx(c, &reps, text_z.as_deref()) {
                 Err(rusqlite::Error::SqliteFailure(e, _))
                     if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
                         && tries < 8 =>
@@ -366,7 +361,6 @@ impl Db {
         c: &NewClip,
         reps: &[(i64, &str, i64, i64, Vec<u8>)],
         text_z: Option<&[u8]>,
-        secret_hash: Option<&[u8]>,
     ) -> Result<Inserted> {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
         let raw: i64 = reps.iter().map(|r| r.3).sum();
@@ -377,8 +371,21 @@ impl Db {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .optional()?;
+        // A copy of a sealed secret matches it by its keyed hash (checked inside
+        // the write lock, so a seal committing meanwhile is seen).
+        let has_secrets = existing.is_none()
+            && tx.query_row("SELECT EXISTS(SELECT 1 FROM tags WHERE tag=?)", [PASSWORD], |r| r.get::<_, bool>(0))?;
+        let secret_hash = if has_secrets {
+            let v = self.vault(false);
+            if v.is_none() {
+                crate::log!("vault: key unavailable; a copy of a sealed secret would not be recognized");
+            }
+            v.map(|v| v.secret_hash(&c.hash))
+        } else {
+            None
+        };
         if existing.is_none() {
-            if let Some(sh) = secret_hash {
+            if let Some(sh) = &secret_hash {
                 let sealed: Option<i64> =
                     tx.query_row("SELECT id FROM clips WHERE hash=?", [sh], |r| r.get(0)).optional()?;
                 if let Some(id) = sealed {
@@ -784,12 +791,51 @@ impl Db {
 
     pub fn set_ocr(&self, id: i64, text: Option<&str>, state: i64) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        // Never on a sealed clip (OCR may have read the image before the seal).
         tx.execute(
-            "UPDATE clips SET ocr_text=?, ocr_state=? WHERE id=?",
-            params![text.filter(|t| !t.trim().is_empty()), state, id],
+            "UPDATE clips SET ocr_text=?1, ocr_state=?2 WHERE id=?3 \
+             AND NOT EXISTS(SELECT 1 FROM tags WHERE clip_id=?3 AND tag=?4)",
+            params![text.filter(|t| !t.trim().is_empty()), state, id, PASSWORD],
         )?;
         Self::reindex(&tx, id)?;
         tx.commit()
+    }
+
+    /// The vault, if its key is there and is the one this database's clips were
+    /// sealed with (fingerprint in settings, written on first seal). `create`
+    /// makes a key when there is none yet (sealing only).
+    pub fn vault(&self, create: bool) -> Option<&'static crate::vault::Vault> {
+        let v = if create { crate::vault::get_or_create() } else { crate::vault::get() }?;
+        match self.get_setting("vault_check") {
+            Some(c) if c != v.check() => {
+                crate::log!("vault: the Keychain key is not the one these clips were sealed with");
+                None
+            }
+            Some(_) => Some(v),
+            None => {
+                if create {
+                    let _ = self.set_setting("vault_check", v.check());
+                }
+                Some(v)
+            }
+        }
+    }
+
+    /// After sealing: rewrite the search index without the secret's old
+    /// entries and push the old pages out of the WAL (secure_delete zeroes
+    /// what is freed).
+    pub fn scrub(&self) -> Result<()> {
+        self.conn.execute("INSERT INTO fts(fts) VALUES('optimize')", [])?;
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA incremental_vacuum;")
+    }
+
+    pub fn is_sealed(&self, id: i64) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM tags WHERE clip_id=? AND tag=?", params![id, PASSWORD], |_| Ok(()))
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     fn tags_of(conn: &Connection, id: i64) -> Result<Vec<String>> {
@@ -823,9 +869,13 @@ impl Db {
         let want = new.iter().any(|t| t == PASSWORD);
         let had = old.iter().any(|t| t == PASSWORD);
         let run = || -> std::result::Result<(), String> {
-            let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
             if want != had {
-                let v = crate::vault::get().ok_or("no encryption key (Keychain unavailable)")?;
+                let v = self.vault(true).ok_or(
+                    "The encryption key is not available: the Keychain is locked, access was denied, \
+                     or it is not the key these clips were sealed with.",
+                )?;
                 if want {
                     Self::seal_clip(&tx, id, v).map_err(|e| e.to_string())?;
                 } else {
@@ -862,7 +912,7 @@ impl Db {
         let text_z = text_z.map(|z| if crate::vault::is_sealed(&z) { z } else { v.seal(&z) });
         let hash = if hash.starts_with(b"pw:") { hash } else { v.secret_hash(&hash) };
         tx.execute(
-            "UPDATE clips SET text_z=?2, hash=?3, preview=?4, thumb=NULL, ocr_text=NULL, ocr_state=1, \
+            "UPDATE clips SET text_z=?2, hash=?3, preview=?4, thumb=NULL, ocr_text=NULL, ocr_state=1, source_path=NULL, \
              stored_size=(SELECT COALESCE(SUM(length(data)),0) FROM reps WHERE clip_id=?1) WHERE id=?1",
             params![id, text_z, hash, SEALED_PREVIEW],
         )?;
@@ -912,11 +962,13 @@ impl Db {
             thumb = crate::ingest::primary_image(&reps).and_then(|p| crate::imageio::thumbnail(&p.data, 760, 300));
         }
         let hash = crate::ingest::content_hash(kind, &reps).ok_or("cannot rebuild the clip's hash")?;
+        let files = crate::ingest::file_paths(&reps);
+        let source_path = if files.len() == 1 { files.first().cloned() } else { None };
         tx.execute(
-            "UPDATE clips SET text_z=?2, hash=?3, preview=?4, thumb=?5, \
+            "UPDATE clips SET text_z=?2, hash=?3, preview=?4, thumb=?5, source_path=COALESCE(?6, source_path), \
              ocr_state=CASE WHEN kind='image' THEN 0 ELSE 1 END, \
              stored_size=(SELECT COALESCE(SUM(length(data)),0) FROM reps WHERE clip_id=?1) WHERE id=?1",
-            params![id, text_z, hash, preview, thumb],
+            params![id, text_z, hash, preview, thumb, source_path],
         )
         .map_err(|e| match e {
             rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation => {

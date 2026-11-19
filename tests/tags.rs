@@ -79,3 +79,43 @@ fn password_tag_seals_and_unseals() {
     assert_eq!(db.reps(id).unwrap(), before);
     assert_eq!(insert(&db, 9, secret), Inserted::Existing(id));
 }
+
+#[test]
+fn ocr_never_lands_on_a_sealed_clip() {
+    cliprust::vault::use_key([7u8; 32]);
+    let db = Db::open_memory().unwrap();
+    let id = insert(&db, 1, "recovery codes 1234-5678-9999").id();
+    db.set_tags(id, &["password".into()]).unwrap();
+    // The OCR worker finished reading the image before the seal.
+    db.set_ocr(id, Some("RECOVERY-CODE 1234-5678"), 1).unwrap();
+    let ocr: Option<String> = db.conn.query_row("SELECT ocr_text FROM clips WHERE id=?", [id], |r| r.get(0)).unwrap();
+    assert_eq!(ocr, None);
+    assert!(db.get_setting("vault_check").is_some(), "key fingerprint stored on first seal");
+}
+
+#[test]
+fn sealing_leaves_no_plaintext_in_the_files() {
+    cliprust::vault::use_key([7u8; 32]);
+    let dir = std::env::temp_dir().join(format!("cliprust-seal-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("t.db");
+    let secret = "zebra-unicorn-sapphire-4417";
+    {
+        let db = Db::open(&path).unwrap();
+        for i in 0..50 {
+            insert(&db, i, &format!("filler clip number {i} with some words"));
+        }
+        let id = insert(&db, 100, secret).id();
+        db.set_tags(id, &["password".into()]).unwrap();
+        db.scrub().unwrap();
+        assert!(search(&db, "sapphire").is_empty());
+        // While the app keeps the database open (no closing checkpoint).
+        for suffix in ["", "-wal", "-shm"] {
+            let f = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+            let bytes = std::fs::read(&f).unwrap_or_default();
+            assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()), "secret found in {}", f.display());
+            assert!(!bytes.windows(8).any(|w| w == b"sapphire"), "fragment found in {}", f.display());
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
