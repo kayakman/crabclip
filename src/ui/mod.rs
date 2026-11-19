@@ -760,6 +760,19 @@ impl App {
         }
     }
 
+    /// Hide for another of our windows (Preferences) without handing focus
+    /// back to the previous app: that activation would race with ours and
+    /// could leave Preferences behind the other app.
+    pub fn hide_for_window(&self) {
+        let p = &self.ui().panel;
+        if p.isVisible() {
+            self.modal.set(true); // no resign-key hide meanwhile
+            p.orderOut(None);
+            self.modal.set(false);
+            self.last_hide.set(Some(Instant::now()));
+        }
+    }
+
     pub fn window_resigned_key(&self, n: &NSNotification) {
         let ui = self.ui();
         let is_panel = n
@@ -783,9 +796,16 @@ impl App {
 
     // ---------------------------------------------------------------- paste
 
-    pub fn paste_selected(&self, plain: bool) {
+    /// ⏎, double-click, ⌘1…9: paste or only copy, per the "⏎ pastes"
+    /// preference; `other` (⌘⏎) does the opposite.
+    pub fn enter(&self, plain: bool, other: bool) {
         let Some(id) = self.selected_id() else { return };
-        self.paste_id(id, plain);
+        self.enter_id(id, plain, other);
+    }
+
+    fn enter_id(&self, id: i64, plain: bool, other: bool) {
+        let paste = self.settings.borrow().enter_pastes != other;
+        self.paste_id(id, plain, paste);
     }
 
     fn write_clip(&self, id: i64, plain: bool) -> bool {
@@ -805,7 +825,9 @@ impl App {
         true
     }
 
-    fn paste_id(&self, id: i64, plain: bool) {
+    /// Puts the clip on the clipboard, closes the window (unless pinned) and,
+    /// with `paste`, sends ⌘V to the app that was in front.
+    fn paste_id(&self, id: i64, plain: bool, paste: bool) {
         if !self.write_clip(id, plain) {
             beep();
             return;
@@ -814,6 +836,14 @@ impl App {
         let _ = self.db.touch_pasted(id, timefmt::now_ms(), move_top);
         self.invalidate(id);
         self.dirty.set(true);
+        if !paste {
+            if self.settings.borrow().pinned {
+                self.run_search(true);
+            } else {
+                self.hide();
+            }
+            return;
+        }
         self.pasting.set(true);
         self.ui().panel.orderOut(None);
         let nsapp = NSApplication::sharedApplication(self.mtm);
@@ -1189,7 +1219,7 @@ impl App {
                 true
             }
             "\r" => {
-                self.copy_selected();
+                self.enter(shift, true);
                 true
             }
             "\u{7f}" | "\u{8}" if table_focused => {
@@ -1210,7 +1240,7 @@ impl App {
                 let n: usize = d.parse().unwrap_or(1);
                 let id = self.ids.borrow().get(n - 1).copied();
                 if let Some(id) = id {
-                    self.paste_id(id, false);
+                    self.enter_id(id, false, false);
                 }
                 true
             }
@@ -1228,7 +1258,7 @@ impl App {
         let ui = self.ui();
         match code {
             36 | 76 => {
-                self.paste_selected(flags.contains(NSEventModifierFlags::Shift));
+                self.enter(flags.contains(NSEventModifierFlags::Shift), false);
                 return true;
             }
             53 => {
@@ -1310,7 +1340,7 @@ impl App {
         } else if sel == sel!(pageDown:) || sel == sel!(scrollPageDown:) {
             self.move_selection(10);
         } else if sel == sel!(insertNewline:) {
-            self.paste_selected(shift);
+            self.enter(shift, false);
         } else if sel == sel!(cancelOperation:) {
             self.escape();
         } else if sel == sel!(insertTab:) {

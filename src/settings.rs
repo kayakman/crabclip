@@ -20,6 +20,8 @@ pub struct Settings {
     pub open_at: String,
     pub launch_at_login: bool,
     pub move_to_top: bool,
+    /// ⏎ pastes into the frontmost app; off (default): ⏎ only copies.
+    pub enter_pastes: bool,
     pub ocr: bool,
     pub row_height: f64,
     /// Zoom of the whole window (text, rows, icons, bars), in percent.
@@ -47,6 +49,7 @@ impl Default for Settings {
             open_at: "last".into(),
             launch_at_login: true,
             move_to_top: true,
+            enter_pastes: false,
             ocr: true,
             row_height: 72.0,
             ui_scale: 100.0,
@@ -82,6 +85,7 @@ impl Settings {
             open_at: get("open_at").unwrap_or(d.open_at),
             launch_at_login: flag("launch_at_login", d.launch_at_login),
             move_to_top: flag("move_to_top", d.move_to_top),
+            enter_pastes: flag("enter_pastes", d.enter_pastes),
             ocr: flag("ocr", d.ocr),
             row_height: get("row_height").and_then(|v| v.parse().ok()).unwrap_or(d.row_height),
             ui_scale: get("ui_scale").and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(d.ui_scale).clamp(50.0, 200.0),
@@ -110,6 +114,7 @@ impl Settings {
             ("open_at", self.open_at.clone()),
             ("launch_at_login", b(self.launch_at_login)),
             ("move_to_top", b(self.move_to_top)),
+            ("enter_pastes", b(self.enter_pastes)),
             ("ocr", b(self.ocr)),
             ("row_height", self.row_height.to_string()),
             ("ui_scale", self.ui_scale.to_string()),

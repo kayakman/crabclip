@@ -16,18 +16,19 @@ history on crashes).
 | Key | Action |
 | --- | --- |
 | ↑ ↓ / PgUp PgDn | move (also while typing in search) |
-| ⏎ | paste into the frontmost app · ⇧⏎ paste as plain text |
+| ⏎ / double-click | copy to the clipboard and close · ⇧⏎ as plain text (Preferences: "⏎ pastes" pastes into the app in front instead) |
 | ⌘F, `/`, or just start typing | search |
 | `s` | toggle the starred-only filter |
 | space, ⌘S, or click ☆ | star / unstar |
-| ⌘1…⌘9 | paste the nth clip |
-| ⌘C / ⌘⏎ | copy to the clipboard without pasting |
+| ⌘1…⌘9 | the nth clip, like ⏎ |
+| ⌘⏎ | the other one: paste when ⏎ copies, copy when ⏎ pastes |
+| ⌘C | copy to the clipboard |
 | ⌫ | delete clip |
 | → ← | open / fold the preview pane (or click its button, top right) |
 | ⌘P | pin (window stays open) |
 | Esc | clear search, then close |
 | ⌘+ / ⌘− / ⌘0 | interface size bigger / smaller / 100% |
-| ⌘, | preferences (again: close them) |
+| ⌘, | preferences (again, or ⌘W: close them and go back to the history) |
 
 Search: words match anywhere (text, OCR text, app, window title, path, URL;
 case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,

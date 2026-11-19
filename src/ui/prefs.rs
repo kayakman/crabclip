@@ -11,7 +11,7 @@ use objc2_app_kit::{
     NSControlStateValueOn, NSFont, NSPopUpButton, NSSlider, NSTextAlignment, NSTextField, NSView, NSWindow,
     NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSArray, NSNotification, NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::cell::RefCell;
 
 const OPEN_AT: &[(&str, &str)] = &[
@@ -30,6 +30,7 @@ struct Prefs {
     open_at: Retained<NSPopUpButton>,
     login: Retained<NSButton>,
     move_top: Retained<NSButton>,
+    enter_pastes: Retained<NSButton>,
     ocr: Retained<NSButton>,
     rows: Retained<NSPopUpButton>,
     font: Retained<NSPopUpButton>,
@@ -137,20 +138,19 @@ impl Form<'_> {
 pub fn show() {
     let a = app();
     let mtm = a.mtm;
-    let nsapp = NSApplication::sharedApplication(mtm);
     let existing = PREFS.with(|p| p.borrow().as_ref().map(|p| p.window.clone()));
     if let Some(w) = existing {
         if w.isVisible() && w.isKeyWindow() {
-            w.close(); // ⌘, again closes them
+            w.close(); // ⌘, again closes them (and brings the history back)
             return;
         }
         refresh_status();
-        nsapp.activate();
-        w.makeKeyAndOrderFront(None);
+        a.hide_for_window();
+        bring_forward(&w);
         return;
     }
     let s = a.settings.borrow().clone();
-    let (w, h) = (580.0, 730.0);
+    let (w, h) = (580.0, 758.0);
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -209,6 +209,7 @@ pub fn show() {
     f.label("General:");
     let login = f.check("Launch at login (restarts if it ever crashes)", s.launch_at_login);
     let move_top = f.check("Move pasted clips to the top", s.move_to_top);
+    let enter_pastes = f.check("⏎ pastes into the app in front (off: ⏎ copies; ⌘⏎ the other)", s.enter_pastes);
     let ocr = f.check("Recognize text in images (searchable)", s.ocr);
     f.y -= 6.0;
 
@@ -257,6 +258,7 @@ pub fn show() {
             open_at,
             login,
             move_top,
+            enter_pastes,
             ocr,
             rows,
             font,
@@ -271,10 +273,32 @@ pub fn show() {
             ax,
         })
     });
+    window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*a.handler)));
     refresh_status();
-    a.hide();
-    nsapp.activate();
-    window.makeKeyAndOrderFront(None);
+    a.hide_for_window();
+    bring_forward(&window);
+}
+
+/// Front and key even though cliprust is an accessory app that is usually not
+/// active (the history panel never activates it).
+fn bring_forward(w: &NSWindow) {
+    let nsapp = NSApplication::sharedApplication(app().mtm);
+    #[allow(deprecated)]
+    nsapp.activateIgnoringOtherApps(true);
+    w.makeKeyAndOrderFront(None);
+    w.orderFrontRegardless();
+}
+
+/// Preferences is closing (button, ⌘W or ⌘, again): back to the history.
+pub fn closing(n: &NSNotification) {
+    let is_prefs = PREFS.with(|p| {
+        p.borrow().as_ref().is_some_and(|p| {
+            n.object().is_some_and(|o| std::ptr::eq(&*o as *const AnyObject, &*p.window as *const NSWindow as *const AnyObject))
+        })
+    });
+    if is_prefs {
+        dispatch2::DispatchQueue::main().exec_async(|| app().show());
+    }
 }
 
 fn refresh_status() {
@@ -326,6 +350,7 @@ pub fn changed(_sender: Option<&AnyObject>) {
         p.scale_label.setStringValue(&ns(&format!("{}%", s.ui_scale)));
         s.launch_at_login = on(&p.login);
         s.move_to_top = on(&p.move_top);
+        s.enter_pastes = on(&p.enter_pastes);
         s.ocr = on(&p.ocr);
         s.img_scale_pct = p.img_pct.stringValue().to_string().trim().parse::<u32>().unwrap_or(100).clamp(5, 100);
         s.img_scale_min_mp = p.img_mp.stringValue().to_string().trim().parse::<f64>().unwrap_or(12.0).max(0.0);

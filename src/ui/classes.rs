@@ -87,6 +87,11 @@ define_class!(
             app().window_resigned_key(n);
         }
 
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, n: &NSNotification) {
+            super::prefs::closing(n);
+        }
+
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _n: &NSNotification) {
             app().apply_scale();
@@ -139,7 +144,7 @@ define_class!(
         #[unsafe(method(rowDoubleClicked:))]
         fn row_double_clicked(&self, _s: Option<&AnyObject>) {
             if app().clicked_row() >= 0 {
-                app().paste_selected(false);
+                app().enter(false, false);
             }
         }
 

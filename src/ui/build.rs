@@ -102,6 +102,7 @@ pub fn main_menu(a: &App) {
     let app_item = NSMenuItem::new(mtm);
     let app_menu = NSMenu::new(mtm);
     app_menu.addItem(&menu_item(mtm, "Preferences…", Some(sel!(showPreferences:)), ",", Some(&a.handler), 0));
+    app_menu.addItem(&menu_item(mtm, "Close Window", Some(sel!(performClose:)), "w", None, 0));
     app_menu.addItem(&menu_item(mtm, "Quit cliprust", Some(sel!(quit:)), "q", Some(&a.handler), 0));
     app_item.setSubmenu(Some(&app_menu));
     bar.addItem(&app_item);
