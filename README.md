@@ -1,15 +1,19 @@
-# cliprust
+# crabclip 🦀📋
 
-A forever clipboard history for macOS: a native AppKit menu bar app in Rust,
-replacing Collective.app (which kept everything in memory, used GBs and lost
-history on crashes).
+A forever clipboard history for macOS: a native AppKit menu bar app written in
+Rust. Every copy goes straight to a local SQLite database, so nothing is lost
+on a crash or restart, and years of history stay searchable without eating
+memory.
 
 - **⌘⌥V** opens the history (at its last position; first time under the menu bar crab claw).
 - Every copy is written to SQLite immediately: all pasteboard representations
   byte-for-byte (zstd-compressed when it helps), source app, window title,
   document path, source URL, timestamps. Recall puts back exactly what was copied.
 - Text found in images (Apple Vision OCR) is searchable.
+- Tags, stars, an app filter, and an encrypted `password` tag for secrets.
+- Imports the history of Collective.app if you are coming from it.
 - Runs as a login agent that launchd restarts if it ever crashes.
+- Everything stays on your Mac: no network access, no telemetry.
 
 ## Keys
 
@@ -47,9 +51,32 @@ case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,
 Preferences also set the text size and an interface size slider (70–125%, in 5% steps below 100%)
 that zooms the whole window: text, rows, icons and the window itself.
 
+## Install
+
+Requires macOS 13 or later and a Rust toolchain ([rustup](https://rustup.rs)).
+
+```sh
+git clone https://github.com/rodrigolive/crabclip
+cd crabclip
+make install    # release build, signed, copied to /Applications and started
+```
+
+The build is signed with the first "Developer ID Application" identity in your
+keychain, or ad-hoc if there is none (`SIGN_ID=- make install` forces ad-hoc).
+With an ad-hoc signature macOS may ask again for permissions after a rebuild.
+
+Permissions: **Accessibility** is only needed for "⏎ pastes" (it sends ⌘V to
+the app in front); without it crabclip copies and you paste. Importing from
+Collective reads its sandbox folder, so macOS asks once for access to other
+apps' data.
+
 ## Build
 
-`make` lists the targets (`build`, `run`, `test`, `install`, `import-collective`,
-`unload-collective`, `release`, `logs`, `stats`).
+`make` lists the targets (`build`, `run`, `test`, `install`, `uninstall`,
+`import-collective`, `unload-collective`, `release`, `logs`, `stats`).
 
-Data: `~/Library/Application Support/cliprust/cliprust.db` · Log: `~/Library/Logs/cliprust.log`
+Data: `~/Library/Application Support/crabclip/crabclip.db` · Log: `~/Library/Logs/crabclip.log`
+
+## License
+
+[MIT](LICENSE)

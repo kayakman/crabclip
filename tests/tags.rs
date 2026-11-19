@@ -1,6 +1,6 @@
-use cliprust::db::{AppInfo, Db, Filter, Inserted, Rep, SEALED_PREVIEW};
-use cliprust::ingest::{Capture, build};
-use cliprust::settings::Settings;
+use crabclip::db::{AppInfo, Db, Filter, Inserted, Rep, SEALED_PREVIEW};
+use crabclip::ingest::{Capture, build};
+use crabclip::settings::Settings;
 
 fn capture(ts: i64, text: &str) -> Capture {
     Capture {
@@ -41,7 +41,7 @@ fn urls_are_tagged_and_tags_filter() {
 
 #[test]
 fn password_tag_seals_and_unseals() {
-    cliprust::vault::use_key([7u8; 32]);
+    crabclip::vault::use_key([7u8; 32]);
     let db = Db::open_memory().unwrap();
     let secret = "hunter2-correct-horse-battery";
     let id = insert(&db, 1, secret).id();
@@ -54,7 +54,7 @@ fn password_tag_seals_and_unseals() {
         .query_row("SELECT preview, text_z, hash FROM clips WHERE id=?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap();
     assert_eq!(preview, SEALED_PREVIEW);
-    assert!(cliprust::vault::is_sealed(&text_z));
+    assert!(crabclip::vault::is_sealed(&text_z));
     assert!(hash.starts_with(b"pw:"));
     let raw: Vec<Vec<u8>> = {
         let mut st = db.conn.prepare("SELECT data FROM reps WHERE clip_id=?").unwrap();
@@ -82,7 +82,7 @@ fn password_tag_seals_and_unseals() {
 
 #[test]
 fn ocr_never_lands_on_a_sealed_clip() {
-    cliprust::vault::use_key([7u8; 32]);
+    crabclip::vault::use_key([7u8; 32]);
     let db = Db::open_memory().unwrap();
     let id = insert(&db, 1, "recovery codes 1234-5678-9999").id();
     db.set_tags(id, &["password".into()]).unwrap();
@@ -95,8 +95,8 @@ fn ocr_never_lands_on_a_sealed_clip() {
 
 #[test]
 fn sealing_leaves_no_plaintext_in_the_files() {
-    cliprust::vault::use_key([7u8; 32]);
-    let dir = std::env::temp_dir().join(format!("cliprust-seal-{}", std::process::id()));
+    crabclip::vault::use_key([7u8; 32]);
+    let dir = std::env::temp_dir().join(format!("crabclip-seal-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("t.db");
     let secret = "zebra-unicorn-sapphire-4417";

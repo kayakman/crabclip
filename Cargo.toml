@@ -1,7 +1,13 @@
 [package]
-name = "cliprust"
+name = "crabclip"
 version = "0.1.0"
 edition = "2024"
+description = "A forever clipboard history for macOS: native AppKit menu bar app with a SQLite history"
+license = "MIT"
+repository = "https://github.com/rodrigolive/crabclip"
+readme = "README.md"
+keywords = ["clipboard", "macos", "appkit", "clipboard-manager"]
+categories = ["gui"]
 
 [dependencies]
 blake3 = "1.8.7"

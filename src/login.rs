@@ -1,5 +1,5 @@
 //! Launch at login through SMAppService: a LaunchAgent bundled in the app
-//! (Contents/Library/LaunchAgents) with KeepAlive, so a crash restarts cliprust
+//! (Contents/Library/LaunchAgents) with KeepAlive, so a crash restarts crabclip
 //! but Quit (exit 0) does not. Falls back to the plain login item.
 
 use objc2::msg_send;
@@ -10,7 +10,7 @@ use objc2_foundation::{NSError, NSString};
 #[link(name = "ServiceManagement", kind = "framework")]
 unsafe extern "C" {}
 
-pub const AGENT_PLIST: &str = "com.rod.cliprust.agent.plist";
+pub const AGENT_PLIST: &str = "com.rod.crabclip.agent.plist";
 
 fn service(agent: bool) -> Option<Retained<AnyObject>> {
     let cls = AnyClass::get(c"SMAppService")?;

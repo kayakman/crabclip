@@ -1,32 +1,32 @@
-use cliprust::db::Db;
-use cliprust::settings::Settings;
+use crabclip::db::Db;
+use crabclip::settings::Settings;
 
 fn usage() {
     println!(
-        "cliprust {} — forever clipboard history\n\n\
-         Usage:\n  cliprust                         run the menu bar app\n  \
-         cliprust --import-collective [archive...]   import Collective.app history (default: its container)\n  \
-         cliprust --stats                 print database stats\n  \
-         cliprust --search <query>        search from the terminal",
+        "crabclip {} — forever clipboard history\n\n\
+         Usage:\n  crabclip                         run the menu bar app\n  \
+         crabclip --import-collective [archive...]   import Collective.app history (default: its container)\n  \
+         crabclip --stats                 print database stats\n  \
+         crabclip --search <query>        search from the terminal",
         env!("CARGO_PKG_VERSION")
     );
 }
 
 fn main() {
     std::panic::set_hook(Box::new(|info| {
-        cliprust::log!("PANIC: {info}");
+        crabclip::log!("PANIC: {info}");
     }));
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None => cliprust::ui::run(),
-        Some(a) if a.starts_with("-psn") || a == "--takeover" => cliprust::ui::run(),
+        None => crabclip::ui::run(),
+        Some(a) if a.starts_with("-psn") || a == "--takeover" => crabclip::ui::run(),
         Some("--import-collective") => {
             let db = Db::open(&Db::default_path()).expect("open db");
             let settings = Settings::load(&db);
             let paths: Vec<std::path::PathBuf> = if args.len() > 1 {
                 args[1..].iter().map(Into::into).collect()
             } else {
-                cliprust::collective::default_paths()
+                crabclip::collective::default_paths()
             };
             if paths.is_empty() {
                 println!("No Collective archive found.");
@@ -35,7 +35,7 @@ fn main() {
             let mut summary = Vec::new();
             for p in paths {
                 let mut last = std::time::Instant::now();
-                let r = cliprust::collective::import(&p, &db, &settings, |st| {
+                let r = crabclip::collective::import(&p, &db, &settings, |st| {
                     if last.elapsed().as_secs() >= 2 {
                         last = std::time::Instant::now();
                         eprintln!("  {}/{} added {} merged {}", st.added + st.merged + st.skipped, st.total, st.added, st.merged);
@@ -61,7 +61,7 @@ fn main() {
             println!(
                 "{} clips, {} on disk ({})",
                 db.count().unwrap_or(0),
-                cliprust::timefmt::bytes(db.file_size()),
+                crabclip::timefmt::bytes(db.file_size()),
                 Db::default_path().display()
             );
         }
@@ -70,7 +70,7 @@ fn main() {
             let q = args[1..].join(" ");
             let t0 = std::time::Instant::now();
             let ids = db
-                .search(&cliprust::db::Filter { query: &q, starred: false, app: None }, 50)
+                .search(&crabclip::db::Filter { query: &q, starred: false, app: None }, 50)
                 .unwrap_or_default();
             let dt = t0.elapsed();
             for id in &ids {
@@ -79,7 +79,7 @@ fn main() {
                     println!(
                         "{:>6} {:<20} {:<6} {}",
                         id,
-                        cliprust::timefmt::human(r.copied_at),
+                        crabclip::timefmt::human(r.copied_at),
                         r.kind.as_str(),
                         line
                     );

@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub const MAGIC: &[u8] = b"\0CRV1";
-const SERVICE: &str = "cliprust";
+const SERVICE: &str = "crabclip";
 const ACCOUNT: &str = "clip-key";
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
@@ -26,7 +26,7 @@ pub struct Vault {
 static VAULT: OnceLock<Vault> = OnceLock::new();
 static LAST_FAIL: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// The vault if its key exists (Keychain, or `CLIPRUST_KEY` = 64 hex chars).
+/// The vault if its key exists (Keychain, or `CRABCLIP_KEY` = 64 hex chars).
 pub fn get() -> Option<&'static Vault> {
     load(false)
 }
@@ -81,8 +81,8 @@ fn to_hex(b: &[u8]) -> String {
 }
 
 fn read_key(create: bool) -> Result<Option<[u8; 32]>, String> {
-    if let Ok(k) = std::env::var("CLIPRUST_KEY") {
-        return from_hex(&k).map(Some).ok_or("CLIPRUST_KEY must be 64 hex chars".into());
+    if let Ok(k) = std::env::var("CRABCLIP_KEY") {
+        return from_hex(&k).map(Some).ok_or("CRABCLIP_KEY must be 64 hex chars".into());
     }
     use security_framework::passwords::{get_generic_password, set_generic_password};
     match get_generic_password(SERVICE, ACCOUNT) {
@@ -100,10 +100,10 @@ fn read_key(create: bool) -> Result<Option<[u8; 32]>, String> {
 
 impl Vault {
     fn new(master: [u8; 32]) -> Vault {
-        let check = blake3::derive_key("cliprust 2026-11 key check", &master);
+        let check = blake3::derive_key("crabclip 2026-11 key check", &master);
         Vault {
-            enc: blake3::derive_key("cliprust 2026-11 clip encryption", &master),
-            mac: blake3::derive_key("cliprust 2026-11 secret hash", &master),
+            enc: blake3::derive_key("crabclip 2026-11 clip encryption", &master),
+            mac: blake3::derive_key("crabclip 2026-11 secret hash", &master),
             check: to_hex(&check[..8]),
         }
     }

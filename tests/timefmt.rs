@@ -1,5 +1,5 @@
 use chrono::{FixedOffset, TimeZone};
-use cliprust::timefmt::{human_at, ordinal};
+use crabclip::timefmt::{human_at, ordinal};
 
 fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<FixedOffset> {
     FixedOffset::east_opt(3600).unwrap().with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()

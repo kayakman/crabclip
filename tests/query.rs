@@ -1,4 +1,4 @@
-use cliprust::query::{fts_expr, like_pattern, parse};
+use crabclip::query::{fts_expr, like_pattern, parse};
 
 #[test]
 fn parses_operators() {

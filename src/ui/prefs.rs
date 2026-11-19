@@ -166,7 +166,7 @@ pub fn show() {
         )
     };
     unsafe { window.setReleasedWhenClosed(false) };
-    window.setTitle(&ns("cliprust Preferences"));
+    window.setTitle(&ns("crabclip Preferences"));
     let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, h));
     let target: &AnyObject = &a.handler;
     let mut f = Form { mtm, view: &view, y: h - 44.0, target };
@@ -286,7 +286,7 @@ pub fn show() {
     bring_forward(&window);
 }
 
-/// Front and key even though cliprust is an accessory app that is usually not
+/// Front and key even though crabclip is an accessory app that is usually not
 /// active (the history panel never activates it).
 fn bring_forward(w: &NSWindow) {
     let nsapp = NSApplication::sharedApplication(app().mtm);
@@ -492,7 +492,7 @@ fn import_collective() {
     }
     if !app().confirm(
         "Import Collective history?",
-        "Collective saves its history when it quits: quit Collective first to include its latest clips. Clips already in cliprust are merged, not duplicated.",
+        "Collective saves its history when it quits: quit Collective first to include its latest clips. Clips already in crabclip are merged, not duplicated.",
         "Import",
     ) {
         return;

@@ -1,5 +1,5 @@
-use cliprust::db::Db;
-use cliprust::settings::Settings;
+use crabclip::db::Db;
+use crabclip::settings::Settings;
 
 #[test]
 fn view_settings_roundtrip_and_clamp() {

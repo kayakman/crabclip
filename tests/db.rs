@@ -1,6 +1,6 @@
-use cliprust::db::{AppInfo, Db, Filter, Inserted, Kind, Rep};
-use cliprust::ingest::{Capture, build};
-use cliprust::settings::Settings;
+use crabclip::db::{AppInfo, Db, Filter, Inserted, Kind, Rep};
+use crabclip::ingest::{Capture, build};
+use crabclip::settings::Settings;
 
 fn text_capture(ts: i64, text: &str, app: &str) -> Capture {
     Capture {
@@ -96,7 +96,7 @@ fn files_and_skips() {
 
 #[test]
 fn odd_file_urls_do_not_panic() {
-    use cliprust::ingest::{file_url_to_path, percent_decode};
+    use crabclip::ingest::{file_url_to_path, percent_decode};
     assert_eq!(percent_decode("a%a\u{20ac}b%2"), "a%a\u{20ac}b%2");
     assert_eq!(percent_decode("%E2%82%AC%20x"), "\u{20ac} x");
     assert_eq!(file_url_to_path("file:///tmp/x%a\u{20ac}.txt").as_deref(), Some("/tmp/x%a\u{20ac}.txt"));
@@ -133,9 +133,9 @@ fn image_thumbnail_and_dims() {
         0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
         0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
-    let info = cliprust::imageio::info(png).expect("info");
+    let info = crabclip::imageio::info(png).expect("info");
     assert_eq!((info.width, info.height), (1, 1));
-    let thumb = cliprust::imageio::thumbnail(png, 760, 300).expect("thumb");
+    let thumb = crabclip::imageio::thumbnail(png, 760, 300).expect("thumb");
     assert_eq!(&thumb[..2], &[0xFF, 0xD8], "jpeg");
     let cap = Capture {
         ts: 5,
@@ -153,7 +153,7 @@ fn image_thumbnail_and_dims() {
 
 #[test]
 fn insert_waits_for_a_concurrent_writer() {
-    let dir = std::env::temp_dir().join(format!("cliprust-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("crabclip-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("busy.db");
     let a = Db::open(&path).unwrap();

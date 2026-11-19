@@ -36,10 +36,10 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-pub const SHOW_NOTIFICATION: &str = "com.rod.cliprust.show";
-pub const QUIT_NOTIFICATION: &str = "com.rod.cliprust.quit";
-pub const AGENT_LABEL: &str = "com.rod.cliprust.agent";
-pub const PANEL_AUTOSAVE: &str = "cliprust.panel";
+pub const SHOW_NOTIFICATION: &str = "com.rod.crabclip.show";
+pub const QUIT_NOTIFICATION: &str = "com.rod.crabclip.quit";
+pub const AGENT_LABEL: &str = "com.rod.crabclip.agent";
+pub const PANEL_AUTOSAVE: &str = "crabclip.panel";
 const CACHE_ROWS: usize = 160;
 /// How long a delete can be undone.
 const UNDO_SECONDS: f64 = 4.0;
@@ -158,7 +158,7 @@ pub fn run() {
 
 fn start(handler: &Handler) {
     let mtm = MainThreadMarker::new().unwrap();
-    log!("cliprust {} starting (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
+    log!("crabclip {} starting (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
     let db_path = Db::default_path();
     let db = match Db::open(&db_path) {
         Ok(db) => db,
@@ -214,7 +214,7 @@ fn start(handler: &Handler) {
     a.apply_scale();
     a.apply_preview(false);
 
-    if let Ok(out) = std::env::var("CLIPRUST_SNAPSHOT") {
+    if let Ok(out) = std::env::var("CRABCLIP_SNAPSHOT") {
         a.snapshot(&out);
         std::process::exit(0);
     }
@@ -223,7 +223,7 @@ fn start(handler: &Handler) {
         log!("hotkey: {e}");
         if let Some(btn) = a.ui().status_item.button(a.mtm) {
             let spec = a.settings.borrow().hotkey.clone();
-            btn.setToolTip(Some(&NSString::from_str(&format!("cliprust — {} unavailable", hotkey_label(&spec)))));
+            btn.setToolTip(Some(&NSString::from_str(&format!("crabclip — {} unavailable", hotkey_label(&spec)))));
         }
     }
 
@@ -273,23 +273,23 @@ impl App {
     }
 
     /// Debug aid: render the panel offscreen to a PNG (never shown, never key).
-    /// CLIPRUST_SNAPSHOT_QUERY / _ROW pick what is displayed.
+    /// CRABCLIP_SNAPSHOT_QUERY / _ROW pick what is displayed.
     fn snapshot(&self, out: &str) {
         let ui = self.ui();
-        // CLIPRUST_SNAPSHOT_APPEARANCE=dark|light instead of the system's.
-        if let Ok(look) = std::env::var("CLIPRUST_SNAPSHOT_APPEARANCE") {
+        // CRABCLIP_SNAPSHOT_APPEARANCE=dark|light instead of the system's.
+        if let Ok(look) = std::env::var("CRABCLIP_SNAPSHOT_APPEARANCE") {
             let name = unsafe { if look == "dark" { objc2_app_kit::NSAppearanceNameDarkAqua } else { objc2_app_kit::NSAppearanceNameAqua } };
             NSApplication::sharedApplication(self.mtm).setAppearance(objc2_app_kit::NSAppearance::appearanceNamed(name).as_deref());
         }
         self.rebuild_app_popup();
-        let q = std::env::var("CLIPRUST_SNAPSHOT_QUERY").unwrap_or_default();
+        let q = std::env::var("CRABCLIP_SNAPSHOT_QUERY").unwrap_or_default();
         ui.search.setStringValue(&NSString::from_str(&q));
         self.run_search(true);
         self.update_tag_menu();
-        let row: isize = std::env::var("CLIPRUST_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
+        let row: isize = std::env::var("CRABCLIP_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
         self.select_row(row);
         self.update_preview();
-        if std::env::var("CLIPRUST_SNAPSHOT_DELETE").is_ok() {
+        if std::env::var("CRABCLIP_SNAPSHOT_DELETE").is_ok() {
             // Shows the undo pill; the process exits before the delete is final.
             // Never for a starred clip: its confirmation alert would take focus.
             let starred = self.selected_id().and_then(|id| self.db.row(id).ok().flatten()).is_some_and(|r| r.starred);
@@ -299,13 +299,13 @@ impl App {
                 self.delete_selected();
             }
         }
-        if std::env::var("CLIPRUST_SNAPSHOT_TOGGLE").is_ok() {
+        if std::env::var("CRABCLIP_SNAPSHOT_TOGGLE").is_ok() {
             // As if → / ← was pressed: fold or open the preview.
             let w = ui.panel.frame().size.width;
             self.toggle_preview();
             log!("snapshot: preview toggled, window {w} -> {}, list {} split {}", ui.panel.frame().size.width, ui.list.frame().size.width, ui.split.frame().size.width);
         }
-        if std::env::var("CLIPRUST_SNAPSHOT_LIVE").is_ok() {
+        if std::env::var("CRABCLIP_SNAPSHOT_LIVE").is_ok() {
             // Real compositing, far off every screen and never key: nothing
             // shows and no keystroke can land in it.
             let mut f = ui.panel.frame();
@@ -362,7 +362,7 @@ impl App {
         *current = Some(hk);
         log!("hotkey: {spec}");
         if let Some(btn) = self.ui.get().and_then(|ui| ui.status_item.button(self.mtm)) {
-            btn.setToolTip(Some(&NSString::from_str(&format!("cliprust — {}", hotkey_label(&spec)))));
+            btn.setToolTip(Some(&NSString::from_str(&format!("crabclip — {}", hotkey_label(&spec)))));
         }
         Ok(())
     }
@@ -1142,7 +1142,7 @@ impl App {
         let ui = self.ui();
         let open = self.settings.borrow().preview_open;
         let defaults = NSUserDefaults::standardUserDefaults();
-        let key = NSString::from_str("cliprust.previewWidth");
+        let key = NSString::from_str("crabclip.previewWidth");
         let k = self.settings.borrow().ui_scale / 100.0;
         let divider = ui.split.dividerThickness();
         let list_w = ui.list.frame().size.width;

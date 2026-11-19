@@ -17,7 +17,7 @@ use std::cell::{Cell, RefCell};
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "CliprustHandler"]
+    #[name = "CrabclipHandler"]
     pub struct Handler;
 
     unsafe impl NSObjectProtocol for Handler {}
@@ -259,7 +259,7 @@ impl Handler {
 define_class!(
     #[unsafe(super(NSPanel))]
     #[thread_kind = MainThreadOnly]
-    #[name = "CliprustPanel"]
+    #[name = "CrabclipPanel"]
     pub struct ClipPanel;
 
     impl ClipPanel {
@@ -288,7 +288,7 @@ define_class!(
 define_class!(
     #[unsafe(super(NSTableView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "CliprustTable"]
+    #[name = "CrabclipTable"]
     pub struct ClipTable;
 
     impl ClipTable {
@@ -339,7 +339,7 @@ pub struct RowIvars {
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "CliprustRowView"]
+    #[name = "CrabclipRowView"]
     #[ivars = RowIvars]
     pub struct RowView;
 
@@ -407,7 +407,7 @@ define_class!(
     /// The clip's tags as pills, over the tag field when it is not being edited.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "CliprustTagStrip"]
+    #[name = "CrabclipTagStrip"]
     #[ivars = TagStripIvars]
     pub struct TagStrip;
 
@@ -444,7 +444,7 @@ define_class!(
     /// The search field's drop-down of matching tags.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "CliprustPillMenu"]
+    #[name = "CrabclipPillMenu"]
     #[ivars = PillMenuIvars]
     pub struct PillMenu;
 
@@ -485,7 +485,7 @@ impl PillMenu {
 define_class!(
     #[unsafe(super(NSTableRowView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "CliprustRowBg"]
+    #[name = "CrabclipRowBg"]
     pub struct RowBg;
 
     impl RowBg {

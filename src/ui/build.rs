@@ -73,7 +73,7 @@ pub fn gear_menu(a: &App, with_face: bool) -> Retained<NSMenu> {
     }
     menu.addItem(&menu_item(mtm, "Preferences…", Some(sel!(showPreferences:)), ",", Some(h), 0));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "About cliprust", Some(sel!(showAbout:)), "", Some(h), 0));
+    menu.addItem(&menu_item(mtm, "About crabclip", Some(sel!(showAbout:)), "", Some(h), 0));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     let clear = menu_item(mtm, "Clear", None, "", None, 0);
     let sub = NSMenu::new(mtm);
@@ -91,7 +91,7 @@ pub fn gear_menu(a: &App, with_face: bool) -> Retained<NSMenu> {
     clear.setSubmenu(Some(&sub));
     menu.addItem(&clear);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "Quit cliprust", Some(sel!(quit:)), "q", Some(h), 0));
+    menu.addItem(&menu_item(mtm, "Quit crabclip", Some(sel!(quit:)), "q", Some(h), 0));
     menu
 }
 
@@ -103,7 +103,7 @@ pub fn main_menu(a: &App) {
     let app_menu = NSMenu::new(mtm);
     app_menu.addItem(&menu_item(mtm, "Preferences…", Some(sel!(showPreferences:)), ",", Some(&a.handler), 0));
     app_menu.addItem(&menu_item(mtm, "Close Window", Some(sel!(performClose:)), "w", None, 0));
-    app_menu.addItem(&menu_item(mtm, "Quit cliprust", Some(sel!(quit:)), "q", Some(&a.handler), 0));
+    app_menu.addItem(&menu_item(mtm, "Quit crabclip", Some(sel!(quit:)), "q", Some(&a.handler), 0));
     app_item.setSubmenu(Some(&app_menu));
     bar.addItem(&app_item);
     let edit_item = NSMenuItem::new(mtm);
@@ -146,7 +146,7 @@ pub fn build(a: &App) -> Ui {
     let panel: Retained<ClipPanel> = unsafe {
         msg_send![ClipPanel::alloc(mtm), initWithContentRect: rect(200.0, 300.0, 880.0, 560.0), styleMask: style, backing: NSBackingStoreType::Buffered, defer: false]
     };
-    panel.setTitle(&ns("cliprust"));
+    panel.setTitle(&ns("crabclip"));
     panel.setTitleVisibility(NSWindowTitleVisibility::Hidden);
     panel.setTitlebarAppearsTransparent(true);
     for b in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
@@ -325,7 +325,7 @@ pub fn build(a: &App) -> Ui {
     text_view.setTextContainerInset(NSSize::new(8.0, 8.0));
     preview.addSubview(&text_scroll);
     split.addSubview(&preview);
-    split.setAutosaveName(Some(&ns("cliprust.split")));
+    split.setAutosaveName(Some(&ns("crabclip.split")));
     split.adjustSubviews();
     zoom.addSubview(&split);
 
@@ -386,7 +386,7 @@ pub fn build(a: &App) -> Ui {
 
     // Initial divider position when nothing was autosaved yet.
     let saved = objc2_foundation::NSUserDefaults::standardUserDefaults()
-        .objectForKey(&ns("NSSplitView Subview Frames cliprust.split"))
+        .objectForKey(&ns("NSSplitView Subview Frames crabclip.split"))
         .is_some();
     if !saved {
         split.setPosition_ofDividerAtIndex(left_w, 0);

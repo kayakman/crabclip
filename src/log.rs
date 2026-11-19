@@ -1,4 +1,4 @@
-//! Tiny append-only file logger (~/Library/Logs/cliprust.log), also mirrored to stderr.
+//! Tiny append-only file logger (~/Library/Logs/crabclip.log), also mirrored to stderr.
 
 use std::io::Write;
 use std::sync::Mutex;
@@ -7,7 +7,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 pub fn path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    std::path::Path::new(&home).join("Library/Logs/cliprust.log")
+    std::path::Path::new(&home).join("Library/Logs/crabclip.log")
 }
 
 pub fn write(msg: &str) {

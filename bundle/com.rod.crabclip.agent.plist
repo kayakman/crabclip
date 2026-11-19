@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.rod.cliprust.agent</string>
+	<string>com.rod.crabclip.agent</string>
 	<key>BundleProgram</key>
-	<string>Contents/MacOS/cliprust</string>
+	<string>Contents/MacOS/crabclip</string>
 	<key>AssociatedBundleIdentifiers</key>
 	<array>
-		<string>com.rod.cliprust</string>
+		<string>com.rod.crabclip</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

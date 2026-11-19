@@ -280,11 +280,11 @@ pub struct Db {
 
 impl Db {
     pub fn default_path() -> PathBuf {
-        if let Ok(p) = std::env::var("CLIPRUST_DB") {
+        if let Ok(p) = std::env::var("CRABCLIP_DB") {
             return PathBuf::from(p);
         }
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        Path::new(&home).join("Library/Application Support/cliprust/cliprust.db")
+        Path::new(&home).join("Library/Application Support/crabclip/crabclip.db")
     }
 
     pub fn open(path: &Path) -> Result<Db> {
