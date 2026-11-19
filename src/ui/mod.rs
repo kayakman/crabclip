@@ -23,7 +23,7 @@ use objc2_app_kit::{
     NSApplicationActivationPolicy, NSAttributedStringAppKitDocumentFormats, NSButton, NSColor,
     NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSImage, NSImageView,
     NSMenu, NSPasteboard, NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView,
-    NSBackgroundColorAttributeName, NSForegroundColorAttributeName, NSSearchField, NSSplitView, NSStatusItem, NSTableView, NSTextField, NSTextView, NSUserInterfaceItemIdentification, NSView, NSWorkspace,
+    NSBackgroundColorAttributeName, NSForegroundColorAttributeName, NSParagraphStyleAttributeName, NSSearchField, NSSplitView, NSStatusItem, NSTableView, NSTextField, NSTextView, NSUserInterfaceItemIdentification, NSView, NSWorkspace,
 };
 use objc2_foundation::{
     NSAttributedString, NSBundle, NSData, NSDistributedNotificationCenter, NSIndexSet, NSMutableAttributedString,
@@ -659,9 +659,10 @@ impl App {
                         NSAttributedString::initWithRTF_documentAttributes(NSAttributedString::alloc(), &data, None)
                     };
                     if let Some(s) = s {
+                        let m = NSMutableAttributedString::initWithAttributedString(NSMutableAttributedString::alloc(), &s);
+                        neutral_colors(&m);
                         if let Some(storage) = unsafe { tv.textStorage() } {
-                            storage.setAttributedString(&s);
-                            neutral_colors(&storage);
+                            storage.setAttributedString(&m);
                         }
                         tv.setDrawsBackground(false);
                         tv.scrollRangeToVisible(NSRange::new(0, 0));
@@ -681,15 +682,19 @@ impl App {
 
     // ----------------------------------------------------------------- show
 
-    pub fn show(&self) {
-        let ui = self.ui();
-        let ws = NSWorkspace::sharedWorkspace();
-        if let Some(front) = ws.frontmostApplication() {
+    /// The app focus goes back to when the history closes (unless it is us).
+    pub fn remember_front_app(&self) {
+        if let Some(front) = NSWorkspace::sharedWorkspace().frontmostApplication() {
             let bid = front.bundleIdentifier().map(|s| s.to_string());
             if bid.is_none() || bid != self.own_bundle {
                 *self.prev_app.borrow_mut() = Some(front);
             }
         }
+    }
+
+    pub fn show(&self) {
+        let ui = self.ui();
+        self.remember_front_app();
         *self.app_filter.borrow_mut() = None;
         self.rebuild_app_popup();
         ui.search.setStringValue(&NSString::from_str(""));
@@ -779,7 +784,8 @@ impl App {
             .object()
             .is_some_and(|o| std::ptr::eq(&*o as *const AnyObject, &*ui.panel as *const ClipPanel as *const AnyObject));
         if is_panel && !self.settings.borrow().pinned && !self.pasting.get() && !self.modal.get() {
-            self.hide();
+            // Focus went elsewhere on purpose: don't pull the previous app forward.
+            self.hide_for_window();
         }
     }
 
@@ -1185,7 +1191,9 @@ impl App {
                 true
             }
             "," => {
-                prefs::show();
+                if !ev.isARepeat() {
+                    prefs::show();
+                }
                 true
             }
             "=" | "+" => {
@@ -1506,6 +1514,18 @@ fn neutral_colors(s: &NSMutableAttributedString) {
     let len = s.length();
     let all = NSRange::new(0, len);
     unsafe { s.removeAttribute_range(NSBackgroundColorAttributeName, all) };
+    // Table cells keep their backgrounds on the paragraphs' text blocks.
+    let mut i = 0;
+    while i < len {
+        let mut r = NSRange::new(0, 0);
+        let v = unsafe { s.attribute_atIndex_effectiveRange(NSParagraphStyleAttributeName, i, &mut r) };
+        if let Some(style) = v.and_then(|v| v.downcast::<objc2_app_kit::NSParagraphStyle>().ok()) {
+            for block in style.textBlocks().iter() {
+                block.setBackgroundColor(None);
+            }
+        }
+        i = (r.location + r.length).max(i + 1);
+    }
     let srgb = objc2_app_kit::NSColorSpace::sRGBColorSpace();
     let label = NSColor::labelColor();
     let mut grey = Vec::new();

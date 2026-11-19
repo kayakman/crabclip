@@ -140,17 +140,22 @@ pub fn show() {
     let mtm = a.mtm;
     let existing = PREFS.with(|p| p.borrow().as_ref().map(|p| p.window.clone()));
     if let Some(w) = existing {
-        if w.isVisible() && w.isKeyWindow() {
+        // ⌘, again closes them; the gear / menu bar item only brings them up.
+        let by_key = NSApplication::sharedApplication(mtm)
+            .currentEvent()
+            .is_some_and(|e| e.r#type() == objc2_app_kit::NSEventType::KeyDown);
+        if by_key && w.isVisible() && w.isKeyWindow() {
             w.close(); // ⌘, again closes them (and brings the history back)
             return;
         }
         refresh_status();
+        a.remember_front_app();
         a.hide_for_window();
         bring_forward(&w);
         return;
     }
     let s = a.settings.borrow().clone();
-    let (w, h) = (580.0, 758.0);
+    let (w, h) = (580.0, 788.0);
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -209,7 +214,8 @@ pub fn show() {
     f.label("General:");
     let login = f.check("Launch at login (restarts if it ever crashes)", s.launch_at_login);
     let move_top = f.check("Move pasted clips to the top", s.move_to_top);
-    let enter_pastes = f.check("⏎ pastes into the app in front (off: ⏎ copies; ⌘⏎ the other)", s.enter_pastes);
+    let enter_pastes = f.check("⏎ pastes into the app in front", s.enter_pastes);
+    f.note("Off: ⏎ only copies the clip. ⌘⏎ always does the other.");
     let ocr = f.check("Recognize text in images (searchable)", s.ocr);
     f.y -= 6.0;
 
@@ -275,6 +281,7 @@ pub fn show() {
     });
     window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*a.handler)));
     refresh_status();
+    a.remember_front_app();
     a.hide_for_window();
     bring_forward(&window);
 }
@@ -297,7 +304,15 @@ pub fn closing(n: &NSNotification) {
         })
     });
     if is_prefs {
-        dispatch2::DispatchQueue::main().exec_async(|| app().show());
+        dispatch2::DispatchQueue::main().exec_async(|| {
+            let a = app();
+            if a.ui().panel.isVisible() {
+                // Pinned and still up: keep its search and filter.
+                a.ui().panel.makeKeyAndOrderFront(None);
+            } else {
+                a.show();
+            }
+        });
     }
 }
 
