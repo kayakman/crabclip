@@ -167,7 +167,10 @@ fn start(handler: &Handler) {
             std::process::exit(2);
         }
     };
-    let settings = Settings::load(&db);
+    let mut settings = Settings::load(&db);
+    // Every launch shows the whole history: a starred-only filter left on
+    // looked like a lost database.
+    settings.star_filter = false;
     let notify: crate::worker::Notify = std::sync::Arc::new(|e: Event| {
         DispatchQueue::main().exec_async(move || app().on_event(e));
     });
@@ -627,7 +630,13 @@ impl App {
         let filtered = ui.search.stringValue().length() > 0
             || self.settings.borrow().star_filter
             || self.app_filter.borrow().is_some();
-        let label = if filtered { format!("{n} found") } else { format!("{n}") };
+        let label = if self.settings.borrow().star_filter {
+            format!("{n} starred only")
+        } else if filtered {
+            format!("{n} found")
+        } else {
+            format!("{n}")
+        };
         ui.count_label.setStringValue(&NSString::from_str(&label));
     }
 
@@ -1205,9 +1214,9 @@ impl App {
         };
         ui.star_btn.setImage(star_img.as_deref());
         ui.star_btn.setToolTip(Some(&NSString::from_str(if star {
-            "Showing starred only (S)"
+            "Showing starred only (⇧⌘S)"
         } else {
-            "Show starred only (S)"
+            "Show starred only (⇧⌘S)"
         })));
         let pin_img = if pin {
             draw::tinted_symbol("pin.fill", &NSColor::controlAccentColor(), 14.0)
@@ -1376,6 +1385,10 @@ impl App {
                 self.quit();
                 true
             }
+            "s" if shift => {
+                self.toggle_star_filter();
+                true
+            }
             "s" => {
                 if let Some(id) = self.selected_id() {
                     self.toggle_star(id);
@@ -1456,11 +1469,9 @@ impl App {
             _ => {}
         }
         let chars = ev.characters().map(|s| s.to_string()).unwrap_or_default();
+        // Plain letters (s included) start a search: a bare `s` used to flip
+        // the starred-only filter, so typing "s…" hid nearly everything.
         match chars.as_str() {
-            "s" | "S" => {
-                self.toggle_star_filter();
-                true
-            }
             " " => {
                 if let Some(id) = self.selected_id() {
                     self.toggle_star(id);

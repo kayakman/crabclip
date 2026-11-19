@@ -196,7 +196,7 @@ pub fn build(a: &App) -> Ui {
     app_popup.setFont(Some(&NSFont::systemFontOfSize(12.0)));
     app_popup.setFocusRingType(NSFocusRingType::None);
     top.addSubview(&app_popup);
-    let star_btn = icon_button(mtm, rect(218.0, cy, 28.0, 24.0), "star", "Starred only (S)", h, sel!(toggleStarFilter:));
+    let star_btn = icon_button(mtm, rect(218.0, cy, 28.0, 24.0), "star", "Starred only (⇧⌘S)", h, sel!(toggleStarFilter:));
     top.addSubview(&star_btn);
     let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), rect(252.0, cy, w - 252.0 - 72.0, 24.0));
     search.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);

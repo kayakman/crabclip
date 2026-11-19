@@ -18,7 +18,7 @@ history on crashes).
 | ↑ ↓ / PgUp PgDn | move (also while typing in search) |
 | ⏎ / double-click | copy to the clipboard and close · ⇧⏎ as plain text (Preferences: "⏎ pastes" pastes into the app in front instead) |
 | ⌘F, `/`, or just start typing | search |
-| `s` | toggle the starred-only filter |
+| ⇧⌘S or click the ☆ next to the app filter | starred-only filter (off again at every launch) |
 | space, ⌘S, or click ☆ | star / unstar |
 | ⌘1…⌘9 | the nth clip, like ⏎ |
 | ⌘⏎ | the other one: paste when ⏎ copies, copy when ⏎ pastes |
