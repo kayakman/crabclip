@@ -202,6 +202,10 @@ fn start(handler: &Handler) {
 
     if let Err(e) = a.register_hotkey() {
         log!("hotkey: {e}");
+        if let Some(btn) = a.ui().status_item.button(a.mtm) {
+            let spec = a.settings.borrow().hotkey.clone();
+            btn.setToolTip(Some(&NSString::from_str(&format!("cliprust — {} unavailable", hotkey_label(&spec)))));
+        }
     }
 
     unsafe {
@@ -270,6 +274,8 @@ impl App {
             // Real compositing, far off every screen and never key: nothing
             // shows and no keystroke can land in it.
             let mut f = ui.panel.frame();
+            // Don't let the far-away position become the remembered one.
+            ui.panel.setFrameAutosaveName(&NSString::from_str(""));
             f.origin = NSPoint::new(-30000.0, -30000.0);
             ui.panel.setFrame_display(f, true);
             ui.panel.orderFrontRegardless();
@@ -929,6 +935,12 @@ impl App {
         f.size.width = (f.size.width * k).round();
         f.size.height = (f.size.height * k).round();
         f.origin.y = top - f.size.height;
+        if let Some(vis) = ui.panel.screen().map(|s| s.visibleFrame()) {
+            f.size.width = f.size.width.min(vis.size.width);
+            f.size.height = f.size.height.min(vis.size.height);
+            f.origin.x = f.origin.x.min(vis.origin.x + vis.size.width - f.size.width).max(vis.origin.x);
+            f.origin.y = f.origin.y.max(vis.origin.y).min(vis.origin.y + vis.size.height - f.size.height);
+        }
         ui.panel.setFrame_display(f, ui.panel.isVisible());
         self.apply_scale();
     }
@@ -939,6 +951,9 @@ impl App {
     }
 
     pub fn set_preview_open(&self, open: bool) {
+        if self.settings.borrow().preview_open == open {
+            return; // already so: key repeats do nothing
+        }
         {
             let mut s = self.settings.borrow_mut();
             s.preview_open = open;
@@ -994,6 +1009,12 @@ impl App {
         } else if !open && !ui.preview.isHidden() {
             let pane = ui.preview.frame().size.width;
             defaults.setDouble_forKey(pane, &key);
+            let in_pane = ui.panel.firstResponder().is_some_and(|r| {
+                r.downcast_ref::<NSView>().is_some_and(|v| v.isDescendantOf(&ui.preview))
+            });
+            if in_pane {
+                ui.panel.makeFirstResponder(Some(&ui.table));
+            }
             ui.preview.setHidden(true);
             if resize {
                 // Borderless sideways: the window is the list plus the divider
@@ -1374,14 +1395,34 @@ fn hotkey_label(spec: &str) -> String {
             "ctrl" | "control" => mods.push('⌃'),
             "alt" | "option" | "opt" => mods.push('⌥'),
             "shift" => mods.push('⇧'),
-            "cmd" | "command" | "super" | "meta" => mods.push('⌘'),
-            k => key = k.trim_start_matches("key").to_uppercase(),
+            "cmd" | "command" | "super" | "meta" | "cmdorctrl" | "cmdorcontrol" => mods.push('⌘'),
+            k => key = key_label(k),
         }
     }
     // Menus order modifiers ⌃⌥⇧⌘.
     let mut m: Vec<char> = mods.chars().collect();
     m.sort_by_key(|c| "⌃⌥⇧⌘".chars().position(|x| x == *c));
     m.into_iter().collect::<String>() + &key
+}
+
+fn key_label(k: &str) -> String {
+    let k = k.strip_prefix("key").or_else(|| k.strip_prefix("digit")).unwrap_or(k);
+    match k {
+        "space" => "Space".into(),
+        "enter" | "return" => "↩".into(),
+        "tab" => "⇥".into(),
+        "backspace" => "⌫".into(),
+        "escape" | "esc" => "⎋".into(),
+        "arrowup" | "up" => "↑".into(),
+        "arrowdown" | "down" => "↓".into(),
+        "arrowleft" | "left" => "←".into(),
+        "arrowright" | "right" => "→".into(),
+        _ if k.chars().count() == 1 => k.to_uppercase(),
+        _ => {
+            let mut c = k.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        }
+    }
 }
 
 fn is_code_app(bundle: &str) -> bool {

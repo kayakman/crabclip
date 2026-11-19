@@ -16,4 +16,8 @@ fn view_settings_roundtrip_and_clamp() {
     db.set_setting("font_size", "2").unwrap();
     let c = Settings::load(&db);
     assert_eq!((c.ui_scale, c.font_size), (200.0, 9.0));
+    db.set_setting("ui_scale", "NaN").unwrap();
+    db.set_setting("font_size", "inf").unwrap();
+    let n = Settings::load(&db);
+    assert_eq!((n.ui_scale, n.font_size), (100.0, 13.0));
 }
