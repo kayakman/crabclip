@@ -9,10 +9,10 @@ use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackgroundStyle, NSControl, NSControlTextEditingDelegate,
     NSEvent, NSMenuDelegate, NSPanel, NSSearchFieldDelegate, NSTableRowView, NSTableView,
     NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSTextView, NSView,
-    NSWindowDelegate, NSTableColumn,
+    NSWindowDelegate, NSTableColumn, NSTokenField, NSTokenFieldDelegate,
 };
-use objc2_foundation::{NSInteger, NSNotification, NSPoint, NSRect};
-use std::cell::Cell;
+use objc2_foundation::{NSArray, NSInteger, NSNotification, NSPoint, NSRect, NSSize, NSString};
+use std::cell::{Cell, RefCell};
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -76,9 +76,39 @@ define_class!(
         fn do_command(&self, control: &NSControl, _tv: &NSTextView, sel: Sel) -> bool {
             app().search_command(control, sel)
         }
+
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn control_text_did_end_editing(&self, n: &NSNotification) {
+            app().text_ended(n);
+        }
     }
 
     unsafe impl NSTextFieldDelegate for Handler {}
+
+    unsafe impl NSTokenFieldDelegate for Handler {
+        #[unsafe(method_id(tokenField:displayStringForRepresentedObject:))]
+        fn token_display(&self, _tf: &NSTokenField, obj: &AnyObject) -> Option<Retained<NSString>> {
+            obj.downcast_ref::<NSString>().map(|s| NSString::from_str(&super::tag_label(&s.to_string())))
+        }
+
+        #[unsafe(method_id(tokenField:editingStringForRepresentedObject:))]
+        fn token_editing(&self, _tf: &NSTokenField, obj: &AnyObject) -> Option<Retained<NSString>> {
+            obj.downcast_ref::<NSString>().map(|s| NSString::from_str(&s.to_string()))
+        }
+
+        #[unsafe(method_id(tokenField:completionsForSubstring:indexOfToken:indexOfSelectedItem:))]
+        fn token_completions(
+            &self,
+            _tf: &NSTokenField,
+            sub: &NSString,
+            _idx: NSInteger,
+            _selected: *mut NSInteger,
+        ) -> Option<Retained<NSArray<NSString>>> {
+            let names: Vec<Retained<NSString>> =
+                app().tag_matches(&sub.to_string(), 12).into_iter().map(|(t, _)| NSString::from_str(&t)).collect();
+            Some(NSArray::from_retained_slice(&names))
+        }
+    }
     unsafe impl NSSearchFieldDelegate for Handler {}
 
     unsafe impl NSWindowDelegate for Handler {
@@ -138,7 +168,14 @@ define_class!(
 
         #[unsafe(method(searchChanged:))]
         fn search_changed(&self, _s: Option<&AnyObject>) {
-            app().run_search(true);
+            let a = app();
+            a.run_search(true);
+            a.update_tag_menu();
+        }
+
+        #[unsafe(method(tagsChanged:))]
+        fn tags_changed(&self, _s: Option<&AnyObject>) {
+            app().save_tags();
         }
 
         #[unsafe(method(rowDoubleClicked:))]
@@ -283,6 +320,19 @@ define_class!(
             super::draw::row(self);
         }
 
+        // Redraw at the new size instead of stretching the old drawing (the
+        // star looked wide after the window was folded or zoomed).
+        #[unsafe(method(setFrameSize:))]
+        fn set_frame_size(&self, size: NSSize) {
+            let old = self.frame().size;
+            unsafe {
+                let _: () = msg_send![super(self), setFrameSize: size];
+            }
+            if old != size {
+                self.setNeedsDisplay(true);
+            }
+        }
+
         #[unsafe(method(setBackgroundStyle:))]
         fn set_background_style(&self, style: NSBackgroundStyle) {
             let sel = style == NSBackgroundStyle::Emphasized;
@@ -311,6 +361,89 @@ define_class!(
 impl RowView {
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(RowIvars { clip: Cell::new(0), selected: Cell::new(false) });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+pub struct TagStripIvars {
+    pub tags: RefCell<Vec<String>>,
+}
+
+define_class!(
+    /// The clip's tags as pills, over the tag field when it is not being edited.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CliprustTagStrip"]
+    #[ivars = TagStripIvars]
+    pub struct TagStrip;
+
+    impl TagStrip {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            super::draw::tag_strip(self);
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _ev: &NSEvent) {
+            app().focus_tags();
+        }
+    }
+);
+
+impl TagStrip {
+    pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(TagStripIvars { tags: RefCell::new(Vec::new()) });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+pub struct PillMenuIvars {
+    pub items: RefCell<Vec<(String, i64)>>,
+}
+
+define_class!(
+    /// The search field's drop-down of matching tags.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CliprustPillMenu"]
+    #[ivars = PillMenuIvars]
+    pub struct PillMenu;
+
+    impl PillMenu {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _ev: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            super::draw::pill_menu(self);
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, ev: &NSEvent) {
+            let p: NSPoint = self.convertPoint_fromView(ev.locationInWindow(), None);
+            let name = super::draw::pill_menu_item_at(p.y).and_then(|i| self.ivars().items.borrow().get(i).map(|t| t.0.clone()));
+            if let Some(name) = name {
+                app().accept_tag(&name);
+            }
+        }
+    }
+);
+
+impl PillMenu {
+    pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PillMenuIvars { items: RefCell::new(Vec::new()) });
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 }

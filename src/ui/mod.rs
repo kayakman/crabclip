@@ -68,6 +68,10 @@ pub struct Ui {
     pub list: Retained<NSScrollView>,
     pub preview: Retained<NSView>,
     pub zoom: Retained<NSView>,
+    pub tags_field: Retained<objc2_app_kit::NSTokenField>,
+    pub tag_strip: Retained<classes::TagStrip>,
+    pub tag_menu: Retained<objc2_app_kit::NSPanel>,
+    pub tag_menu_view: Retained<classes::PillMenu>,
     pub top_bar: Retained<NSView>,
     pub bottom_bar: Retained<NSView>,
     pub date_label: Retained<NSTextField>,
@@ -97,6 +101,9 @@ pub struct App {
     hotkey: RefCell<Option<(GlobalHotKeyManager, Option<HotKey>)>>,
     pasting: Cell<bool>,
     modal: Cell<bool>,
+    /// Clip whose tags the tag field shows (saved there even if the
+    /// selection moved before editing ended).
+    tags_clip: Cell<i64>,
     last_hide: Cell<Option<Instant>>,
     last_prune: Cell<Option<Instant>>,
     seen_apps: RefCell<HashSet<String>>,
@@ -177,6 +184,7 @@ fn start(handler: &Handler) {
         hotkey: RefCell::new(None),
         pasting: Cell::new(false),
         modal: Cell::new(false),
+        tags_clip: Cell::new(0),
         last_hide: Cell::new(None),
         last_prune: Cell::new(None),
         seen_apps: RefCell::new(HashSet::new()),
@@ -261,6 +269,7 @@ impl App {
         let q = std::env::var("CLIPRUST_SNAPSHOT_QUERY").unwrap_or_default();
         ui.search.setStringValue(&NSString::from_str(&q));
         self.run_search(true);
+        self.update_tag_menu();
         let row: isize = std::env::var("CLIPRUST_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
         self.select_row(row);
         self.update_preview();
@@ -282,6 +291,11 @@ impl App {
             NSRunLoop::currentRunLoop().runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.8));
             let n = ui.panel.windowNumber().to_string();
             let _ = std::process::Command::new("/usr/sbin/screencapture").args(["-x", "-o", "-l", &n, out]).status();
+            if ui.tag_menu.isVisible() {
+                let m = ui.tag_menu.windowNumber().to_string();
+                let mout = out.replace(".png", "-menu.png");
+                let _ = std::process::Command::new("/usr/sbin/screencapture").args(["-x", "-o", "-l", &m, &mout]).status();
+            }
             ui.panel.orderOut(None);
             log!("live snapshot of window {n} written to {out}");
             return;
@@ -525,6 +539,7 @@ impl App {
             img_h: 0,
             img_scale: 1.0,
             thumb: None,
+            tags: Vec::new(),
         };
         let big = self.app_icon(&info);
         let small: Retained<NSImage> = unsafe { msg_send![&*big, copy] };
@@ -622,15 +637,17 @@ impl App {
             set_text(&ui.text_view, "", false, self.settings.borrow().font_size);
             ui.meta.setStringValue(&NSString::from_str(""));
             ui.date_label.setStringValue(&NSString::from_str(""));
+            self.set_tags_field(None, &[]);
             return;
         };
         let Ok(Some(d)) = self.db.detail(id) else { return };
+        self.set_tags_field(Some(id), &d.tags);
         ui.date_label.setStringValue(&NSString::from_str(&timefmt::human(d.copied_at)));
         if !self.settings.borrow().preview_open {
             return; // filled in when the pane opens
         }
         let mut shown_image = false;
-        if d.kind == Kind::Image {
+        if d.kind == Kind::Image && !d.sealed() {
             let types = self.db.rep_types(id).unwrap_or_default();
             let uti = crate::ingest::IMAGE_TYPES.iter().find(|t| types.iter().any(|x| x == *t));
             if let Some(data) = uti.and_then(|u| self.db.rep(id, u).ok().flatten()) {
@@ -651,6 +668,11 @@ impl App {
 
     fn show_text_preview(&self, id: i64, d: &Detail) {
         let tv = &self.ui().text_view;
+        if d.sealed() {
+            let msg = "🔒  Password, stored encrypted.\n\n⏎ copies it. Remove the “password” tag (⌘T) to store it in the clear again.";
+            set_text(tv, msg, false, self.settings.borrow().font_size);
+            return;
+        }
         if matches!(d.kind, Kind::Text | Kind::Url) {
             if let Ok(Some(rtf)) = self.db.rep(id, "public.rtf") {
                 if rtf.len() < 2 * 1024 * 1024 {
@@ -750,6 +772,7 @@ impl App {
     }
 
     pub fn hide(&self) {
+        self.hide_tag_menu();
         let p = &self.ui().panel;
         if p.isVisible() {
             p.orderOut(None);
@@ -769,6 +792,7 @@ impl App {
     /// back to the previous app: that activation would race with ours and
     /// could leave Preferences behind the other app.
     pub fn hide_for_window(&self) {
+        self.hide_tag_menu();
         let p = &self.ui().panel;
         if p.isVisible() {
             self.modal.set(true); // no resign-key hide meanwhile
@@ -823,7 +847,13 @@ impl App {
             }
         } else {
             match self.db.reps(id) {
-                Ok(reps) if !reps.is_empty() => crate::paste::write(&pb, &reps),
+                Ok(mut reps) if !reps.is_empty() => {
+                    if self.db.tags(id).unwrap_or_default().iter().any(|t| t == crate::db::PASSWORD) {
+                        // Other clipboard tools (and history apps) skip concealed data.
+                        reps.push(crate::db::Rep { item: 0, uti: "org.nspasteboard.ConcealedType".into(), data: Vec::new() });
+                    }
+                    crate::paste::write(&pb, &reps)
+                }
                 _ => return false,
             }
         };
@@ -851,6 +881,7 @@ impl App {
             return;
         }
         self.pasting.set(true);
+        self.hide_tag_menu();
         self.ui().panel.orderOut(None);
         let nsapp = NSApplication::sharedApplication(self.mtm);
         if nsapp.isActive() {
@@ -1208,6 +1239,10 @@ impl App {
                 self.zoom(0);
                 true
             }
+            "t" => {
+                self.focus_tags();
+                true
+            }
             "p" => {
                 self.toggle_pin();
                 true
@@ -1331,10 +1366,213 @@ impl App {
         // The search field's own action (sent on every keystroke) runs the query.
     }
 
+    pub fn text_ended(&self, n: &NSNotification) {
+        let ui = self.ui();
+        if is_obj(n.object().as_deref(), &*ui.search) {
+            self.hide_tag_menu();
+        }
+        if is_obj(n.object().as_deref(), &*ui.tags_field) {
+            // Back to the pills once the action (sent first) has saved.
+            DispatchQueue::main().exec_async(|| {
+                let ui = app().ui();
+                if ui.tags_field.currentEditor().is_none() {
+                    ui.tags_field.setHidden(true);
+                    ui.tag_strip.setHidden(false);
+                }
+            });
+        }
+        // The tag field saves through its action (sent on end editing too).
+    }
+
+    // ------------------------------------------------------------------ tags
+
+    /// Tags starting with `word`, then containing it; the two standard tags
+    /// are always offered.
+    pub fn tag_matches(&self, word: &str, max: usize) -> Vec<(String, i64)> {
+        let w = crate::db::normalize_tag(word);
+        let all = self.db.all_tags().unwrap_or_default();
+        let mut out: Vec<(String, i64)> = all.iter().filter(|(t, _)| t.starts_with(&w)).cloned().collect();
+        out.extend(all.iter().filter(|(t, _)| !t.starts_with(&w) && t.contains(&w)).cloned());
+        for std in [crate::db::PASSWORD, crate::db::URL_TAG] {
+            if std.starts_with(&w) && !out.iter().any(|(t, _)| t == std) {
+                out.push((std.to_string(), 0));
+            }
+        }
+        out.truncate(max);
+        out
+    }
+
+    fn set_tags_field(&self, id: Option<i64>, tags: &[String]) {
+        let f = &self.ui().tags_field;
+        // Don't clobber what is being typed for this clip.
+        if f.currentEditor().is_some() && id == Some(self.tags_clip.get()) {
+            return;
+        }
+        self.tags_clip.set(id.unwrap_or(0));
+        let names: Vec<Retained<NSString>> = tags.iter().map(|t| NSString::from_str(t)).collect();
+        let arr = objc2_foundation::NSArray::from_retained_slice(&names);
+        unsafe { f.setObjectValue(Some(arr.as_ref())) };
+        f.setEnabled(id.is_some());
+        let strip = &self.ui().tag_strip;
+        *strip.ivars().tags.borrow_mut() = tags.to_vec();
+        strip.setNeedsDisplay(true);
+    }
+
+    pub fn focus_tags(&self) {
+        if self.selected_id().is_none() {
+            beep();
+            return;
+        }
+        self.set_preview_open(true);
+        let ui = self.ui();
+        ui.tag_strip.setHidden(true);
+        ui.tags_field.setHidden(false);
+        ui.panel.makeFirstResponder(Some(&ui.tags_field));
+    }
+
+    /// The tag field's action: write its tokens to the clip it shows.
+    pub fn save_tags(&self) {
+        let id = self.tags_clip.get();
+        if id == 0 {
+            return;
+        }
+        let ui = self.ui();
+        let vals: Vec<String> = ui
+            .tags_field
+            .objectValue()
+            .and_then(|o| o.downcast::<objc2_foundation::NSArray>().ok())
+            .map(|a| a.iter().filter_map(|o| o.downcast::<NSString>().ok().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let mut want: Vec<String> = vals.iter().map(|t| crate::db::normalize_tag(t)).filter(|t| !t.is_empty()).collect();
+        want.sort();
+        want.dedup();
+        let mut have = self.db.tags(id).unwrap_or_default();
+        have.sort();
+        if want != have {
+            match self.db.set_tags(id, &vals) {
+                Ok(tags) => {
+                    log!("tags: clip {id} -> {}", tags.join(","));
+                    self.invalidate(id);
+                    self.reload_row_of(id);
+                    if self.selected_id() == Some(id) {
+                        self.update_preview();
+                    }
+                }
+                Err(e) => {
+                    log!("tags: clip {id}: {e}");
+                    self.confirm("Couldn't change the tags", &e, "OK");
+                    self.set_tags_field(Some(id), &self.db.tags(id).unwrap_or_default());
+                }
+            }
+        }
+        // ⏎ in the tag field: done, back to the list.
+        let enter = NSApplication::sharedApplication(self.mtm)
+            .currentEvent()
+            .is_some_and(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 36 | 76));
+        if enter {
+            ui.panel.makeFirstResponder(Some(&ui.table));
+        }
+    }
+
+    /// Drop-down of tags matching the word being typed in the search field.
+    pub fn update_tag_menu(&self) {
+        let ui = self.ui();
+        let text = ui.search.stringValue().to_string();
+        if text.is_empty() || text.ends_with(char::is_whitespace) {
+            self.hide_tag_menu();
+            return;
+        }
+        let word = text.rsplit(char::is_whitespace).next().unwrap_or("").to_lowercase();
+        let (prefixed, w) = match word.strip_prefix("tag:") {
+            Some(rest) => (true, rest.to_string()),
+            None => (false, word.clone()),
+        };
+        if (!prefixed && (w.is_empty() || w.contains(':') || w.starts_with('-'))) || w.starts_with('"') {
+            self.hide_tag_menu();
+            return;
+        }
+        let used = crate::query::parse(&text[..text.len() - word.len()]).tags;
+        let mut items = self.tag_matches(&w, 8);
+        items.retain(|(t, _)| !used.contains(t) && !(prefixed && *t == w));
+        items.truncate(6);
+        if items.is_empty() {
+            self.hide_tag_menu();
+            return;
+        }
+        let k = self.settings.borrow().ui_scale / 100.0;
+        let size = draw::pill_menu_size(&items);
+        *ui.tag_menu_view.ivars().items.borrow_mut() = items;
+        let sf = ui.panel.convertRectToScreen(ui.search.convertRect_toView(ui.search.bounds(), None));
+        let frame = NSRect::new(
+            NSPoint::new(sf.origin.x, sf.origin.y - size.height * k - 3.0),
+            NSSize::new(size.width * k, size.height * k),
+        );
+        ui.tag_menu.setFrame_display(frame, false);
+        ui.tag_menu_view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+        ui.tag_menu_view.setBoundsSize(size);
+        ui.tag_menu_view.setNeedsDisplay(true);
+        if !ui.tag_menu.isVisible() {
+            unsafe { ui.panel.addChildWindow_ordered(&ui.tag_menu, objc2_app_kit::NSWindowOrderingMode::Above) };
+        }
+    }
+
+    pub fn tag_menu_visible(&self) -> bool {
+        self.ui.get().is_some_and(|ui| ui.tag_menu.isVisible())
+    }
+
+    pub fn hide_tag_menu(&self) {
+        if let Some(ui) = self.ui.get() {
+            if ui.tag_menu.isVisible() {
+                ui.panel.removeChildWindow(&ui.tag_menu);
+                ui.tag_menu.orderOut(None);
+            }
+        }
+    }
+
+    /// A tag picked from the drop-down replaces the word being typed.
+    pub fn accept_tag(&self, name: &str) {
+        let ui = self.ui();
+        let text = ui.search.stringValue().to_string();
+        let word_len = if text.ends_with(char::is_whitespace) {
+            0
+        } else {
+            text.rsplit(char::is_whitespace).next().map(str::len).unwrap_or(0)
+        };
+        let new = format!("{}tag:{name} ", &text[..text.len() - word_len]);
+        ui.search.setStringValue(&NSString::from_str(&new));
+        self.hide_tag_menu();
+        ui.panel.makeFirstResponder(Some(&ui.search));
+        if let Some(ed) = ui.search.currentEditor() {
+            ed.setSelectedRange(NSRange::new(ui.search.stringValue().length(), 0));
+        }
+        self.run_search(true);
+    }
+
     pub fn search_command(&self, control: &NSControl, sel: Sel) -> bool {
         let ui = self.ui();
+        if is_obj(Some(control), &*ui.tags_field) {
+            // Esc / Tab leave the tag field (ending the edit saves it).
+            if sel == sel!(cancelOperation:) || sel == sel!(insertTab:) || sel == sel!(insertBacktab:) {
+                ui.panel.makeFirstResponder(Some(&ui.table));
+                return true;
+            }
+            return false;
+        }
         if !std::ptr::eq(control as *const NSControl as *const AnyObject, &*ui.search as *const NSSearchField as *const AnyObject) {
             return false;
+        }
+        if self.tag_menu_visible() {
+            if sel == sel!(insertTab:) {
+                let first = ui.tag_menu_view.ivars().items.borrow().first().map(|t| t.0.clone());
+                if let Some(t) = first {
+                    self.accept_tag(&t);
+                }
+                return true;
+            }
+            if sel == sel!(cancelOperation:) {
+                self.hide_tag_menu();
+                return true;
+            }
         }
         let shift = NSApplication::sharedApplication(self.mtm)
             .currentEvent()
@@ -1477,6 +1715,15 @@ fn hotkey_label(spec: &str) -> String {
     let mut m: Vec<char> = mods.chars().collect();
     m.sort_by_key(|c| "⌃⌥⇧⌘".chars().position(|x| x == *c));
     m.into_iter().collect::<String>() + &key
+}
+
+/// How a tag reads in the tag field: the password tag gets a lock.
+pub fn tag_label(name: &str) -> String {
+    if name == crate::db::PASSWORD { format!("🔒 {name}") } else { name.to_string() }
+}
+
+fn is_obj<A: ?Sized + objc2::Message, B: ?Sized + objc2::Message>(a: Option<&A>, b: &B) -> bool {
+    a.is_some_and(|a| std::ptr::eq(a as *const A as *const AnyObject, b as *const B as *const AnyObject))
 }
 
 fn key_label(k: &str) -> String {

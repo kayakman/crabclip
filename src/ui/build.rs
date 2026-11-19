@@ -1,7 +1,7 @@
 //! Builds the panel (top bar, list | preview split, bottom bar), the gear and
 //! status menus, the status item and the (hidden) main menu.
 
-use super::classes::{ClipPanel, ClipTable};
+use super::classes::{ClipPanel, ClipTable, PillMenu, TagStrip};
 use super::{App, PANEL_AUTOSAVE, Ui, draw};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -10,7 +10,7 @@ use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBezelStyle, NSBorderType,
     NSButton, NSColor, NSEventMask, NSFocusRingType, NSFont, NSImage, NSImageAlignment,
     NSImageScaling, NSImageView, NSMenu, NSMenuItem, NSPopUpButton, NSScrollView, NSSearchField,
-    NSSplitView, NSSplitViewDividerStyle, NSStatusBar, NSTableColumn, NSTableColumnResizingOptions,
+    NSPanel, NSSplitView, NSSplitViewDividerStyle, NSTokenField, NSStatusBar, NSTableColumn, NSTableColumnResizingOptions,
     NSTableViewColumnAutoresizingStyle, NSTableViewGridLineStyle, NSTableViewStyle, NSTextAlignment,
     NSTextField, NSTextView, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
     NSVisualEffectState, NSVisualEffectView, NSWindowButton, NSWindowCollectionBehavior,
@@ -207,6 +207,12 @@ pub fn build(a: &App) -> Ui {
         search.setAction(Some(sel!(searchChanged:)));
     }
     search.setSendsSearchStringImmediately(true);
+    // Our own glyph: the stock one is clipped when the window is zoomed out.
+    if let Some(cell) = search.cell().and_then(|c| c.downcast::<objc2_app_kit::NSSearchFieldCell>().ok()) {
+        if let Some(b) = cell.searchButtonCell() {
+            b.setImage(draw::tinted_symbol("magnifyingglass", &NSColor::secondaryLabelColor(), 12.0).as_deref());
+        }
+    }
     search.setFocusRingType(NSFocusRingType::None);
     top.addSubview(&search);
     let preview_btn = icon_button(mtm, rect(w - 66.0, cy, 28.0, 24.0), "sidebar.right", "Hide preview (←)", h, sel!(togglePreview:));
@@ -257,9 +263,36 @@ pub fn build(a: &App) -> Ui {
 
     let preview = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w - left_w - 1.0, list_h));
     let pw = w - left_w - 1.0;
-    let meta_h = 96.0;
+    // Bottom up: tags (⌘T), metadata, separator, the clip itself.
+    let tags_h = 30.0;
+    let tag_icon = NSImageView::initWithFrame(NSImageView::alloc(mtm), rect(10.0, 7.0, 16.0, 16.0));
+    tag_icon.setImage(draw::tinted_symbol("tag", &NSColor::secondaryLabelColor(), 12.0).as_deref());
+    tag_icon.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMaxYMargin);
+    preview.addSubview(&tag_icon);
+    let tags_field = NSTokenField::initWithFrame(NSTokenField::alloc(mtm), rect(30.0, 4.0, pw - 40.0, 22.0));
+    tags_field.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin);
+    tags_field.setPlaceholderString(Some(&ns("Tags (⌘T) · “password” encrypts the clip")));
+    tags_field.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    tags_field.setBordered(false);
+    tags_field.setDrawsBackground(false);
+    tags_field.setFocusRingType(NSFocusRingType::None);
+    unsafe {
+        tags_field.setDelegate(Some(ProtocolObject::from_ref(&*a.handler)));
+        tags_field.setTarget(Some(h));
+        tags_field.setAction(Some(sel!(tagsChanged:)));
+    }
+    if let Some(cell) = tags_field.cell() {
+        cell.setSendsActionOnEndEditing(true);
+    }
+    tags_field.setTokenStyle(objc2_app_kit::NSTokenStyle::Rounded);
+    tags_field.setHidden(true);
+    preview.addSubview(&tags_field);
+    let tag_strip = TagStrip::new(mtm, rect(30.0, 4.0, pw - 40.0, 22.0));
+    tag_strip.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin);
+    preview.addSubview(&tag_strip);
+    let meta_h = 96.0 + tags_h;
     let meta = NSTextField::wrappingLabelWithString(&ns(""), mtm);
-    meta.setFrame(rect(10.0, 4.0, pw - 20.0, meta_h - 8.0));
+    meta.setFrame(rect(10.0, tags_h + 2.0, pw - 20.0, meta_h - tags_h - 6.0));
     meta.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin);
     meta.setFont(Some(&NSFont::systemFontOfSize(11.0)));
     meta.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -295,6 +328,19 @@ pub fn build(a: &App) -> Ui {
     split.setAutosaveName(Some(&ns("cliprust.split")));
     split.adjustSubviews();
     zoom.addSubview(&split);
+
+    // ---- tag suggestions under the search field
+    let tag_menu: Retained<NSPanel> = unsafe {
+        msg_send![NSPanel::alloc(mtm), initWithContentRect: rect(0.0, 0.0, 220.0, 100.0), styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel, backing: NSBackingStoreType::Buffered, defer: true]
+    };
+    tag_menu.setOpaque(false);
+    tag_menu.setBackgroundColor(Some(&NSColor::clearColor()));
+    tag_menu.setHasShadow(true);
+    tag_menu.setLevel(3);
+    tag_menu.setHidesOnDeactivate(false);
+    unsafe { tag_menu.setReleasedWhenClosed(false) };
+    let tag_menu_view = PillMenu::new(mtm, rect(0.0, 0.0, 220.0, 100.0));
+    tag_menu.setContentView(Some(&tag_menu_view));
 
     // ---- bottom bar
     let bottom = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, BOTTOM));
@@ -347,6 +393,10 @@ pub fn build(a: &App) -> Ui {
         list: scroll,
         preview,
         zoom,
+        tags_field,
+        tag_strip,
+        tag_menu,
+        tag_menu_view,
         top_bar: top,
         bottom_bar: bottom,
         date_label,

@@ -25,14 +25,22 @@ history on crashes).
 | ⌘C | copy to the clipboard |
 | ⌫ | delete clip |
 | → ← | open / fold the preview pane (or click its button, top right) |
+| ⌘T | edit the clip's tags (⏎ or Esc: back to the list) |
 | ⌘P | pin (window stays open) |
 | Esc | clear search, then close |
 | ⌘+ / ⌘− / ⌘0 | interface size bigger / smaller / 100% |
 | ⌘, | preferences (again, or ⌘W: close them and go back to the history) |
 
+Tags: shown as pills on the clip and under the preview. `url` is added to every
+link automatically. Tagging a clip `password` encrypts it (XChaCha20-Poly1305,
+key in the login Keychain): the list shows dots, the preview hides it, its text
+leaves the search index, ⏎ still copies it (marked concealed so other clipboard
+tools skip it); removing the tag stores it in the clear again. While typing in
+search, matching tags drop down: Tab or a click filters by that tag.
+
 Search: words match anywhere (text, OCR text, app, window title, path, URL;
 case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,
-`app:chrome`, `type:image|text|url|file`, `is:star`.
+`app:chrome`, `type:image|text|url|file`, `is:star`, `tag:name`.
 
 Preferences also set the text size and an interface size slider (70–125%, in 5% steps below 100%)
 that zooms the whole window: text, rows, icons and the window itself.

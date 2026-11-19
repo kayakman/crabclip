@@ -195,6 +195,31 @@ fn kind_of(text: Option<&str>, has_image: bool, files: &[String], reps: &[Rep]) 
     }
 }
 
+/// The de-duplication hash of a clip's content (also used to restore it when
+/// it stops being a sealed password).
+pub fn content_hash(kind: Kind, reps: &[Rep]) -> Option<Vec<u8>> {
+    let mut h = blake3::Hasher::new();
+    h.update(kind.as_str().as_bytes());
+    match kind {
+        Kind::Text | Kind::Url => {
+            h.update(text_of(reps).as_deref().unwrap_or("").as_bytes());
+        }
+        Kind::File => {
+            h.update(file_paths(reps).join("\n").as_bytes());
+        }
+        Kind::Image => {
+            h.update(&primary_image(reps)?.data);
+        }
+        Kind::Other => {
+            for r in reps {
+                h.update(r.uti.as_bytes());
+                h.update(&r.data);
+            }
+        }
+    }
+    Some(h.finalize().as_bytes().to_vec())
+}
+
 /// Build the clip to store. Returns None when there is nothing worth keeping.
 pub fn build(c: Capture, s: &Settings) -> Option<NewClip> {
     // Marker types are often empty: check them before dropping empty data.
@@ -247,25 +272,7 @@ pub fn build(c: Capture, s: &Settings) -> Option<NewClip> {
         _ => body_text.as_deref().map(preview_of).unwrap_or_default(),
     };
 
-    let mut h = blake3::Hasher::new();
-    h.update(kind.as_str().as_bytes());
-    match kind {
-        Kind::Text | Kind::Url => {
-            h.update(text.as_deref().unwrap_or("").as_bytes());
-        }
-        Kind::File => {
-            h.update(files.join("\n").as_bytes());
-        }
-        Kind::Image => {
-            h.update(&primary_image(&reps)?.data);
-        }
-        Kind::Other => {
-            for r in &reps {
-                h.update(r.uti.as_bytes());
-                h.update(&r.data);
-            }
-        }
-    }
+    let hash = content_hash(kind, &reps)?;
 
     let mut types: Vec<&str> = Vec::new();
     for r in &reps {
@@ -286,7 +293,7 @@ pub fn build(c: Capture, s: &Settings) -> Option<NewClip> {
     Some(NewClip {
         ts: c.ts,
         kind,
-        hash: h.finalize().as_bytes().to_vec(),
+        hash,
         text: body_text,
         preview,
         app: c.app,

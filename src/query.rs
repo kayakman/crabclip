@@ -5,6 +5,7 @@
 //! Words of 3+ characters go through the FTS5 trigram index; shorter ones fall back
 //! to a LIKE scan of the preview. Supported operators:
 //!   "exact phrase"   -word (exclude)   app:chrome   type:image|text|url|file   is:star
+//!   tag:name (repeatable: all must match)
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Parsed {
@@ -14,6 +15,7 @@ pub struct Parsed {
     pub kind: Option<String>,
     pub app: Option<String>,
     pub starred: bool,
+    pub tags: Vec<String>,
 }
 
 impl Parsed {
@@ -60,6 +62,12 @@ pub fn parse(q: &str) -> Parsed {
     let mut p = Parsed::default();
     for tok in tokens(q) {
         let lower = tok.to_lowercase();
+        if let Some(v) = lower.strip_prefix("tag:") {
+            if !v.is_empty() {
+                p.tags.push(v.to_string());
+            }
+            continue;
+        }
         if let Some(v) = lower.strip_prefix("app:") {
             if !v.is_empty() {
                 p.app = Some(v.to_string());

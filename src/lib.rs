@@ -12,4 +12,5 @@ pub mod query;
 pub mod settings;
 pub mod timefmt;
 pub mod ui;
+pub mod vault;
 pub mod worker;
