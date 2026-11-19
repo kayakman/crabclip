@@ -182,6 +182,8 @@ pub fn build(a: &App) -> Ui {
     // ---- top bar
     let top = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, hgt - TOP, w, TOP));
     top.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin);
+    // App::layout_top places its controls (autoresizing is lossy when narrow).
+    top.setAutoresizesSubviews(false);
     let cy = (TOP - 24.0) / 2.0;
     let close = icon_button(mtm, rect(8.0, cy, 26.0, 24.0), "xmark", "Close (Esc)", h, sel!(closePanel:));
     top.addSubview(&close);

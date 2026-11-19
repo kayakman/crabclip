@@ -893,11 +893,30 @@ impl App {
         ui.zoom.setBoundsSize(NSSize::new(w, h));
         let r = |y: f64, hh: f64| NSRect::new(NSPoint::new(0.0, y), NSSize::new(w, hh.max(0.0)));
         ui.top_bar.setFrame(r(h - build::TOP, build::TOP));
+        self.layout_top(w);
         ui.split.setFrame(r(build::BOTTOM, h - build::TOP - build::BOTTOM));
         ui.bottom_bar.setFrame(r(0.0, build::BOTTOM));
         // Folded, the window is only the list.
         let min_w = if ui.preview.isHidden() { 300.0 } else { 460.0 };
         ui.panel.setMinSize(NSSize::new(min_w * k, 280.0 * k));
+    }
+
+    /// Top bar: close, app filter, star, search, preview, pin. The search
+    /// field takes the slack; under ~420 pt the app filter narrows instead of
+    /// letting the search field vanish.
+    fn layout_top(&self, w: f64) {
+        let ui = self.ui();
+        let cy = (build::TOP - 24.0) / 2.0;
+        let at = |x: f64, width: f64| NSRect::new(NSPoint::new(x, cy), NSSize::new(width.max(0.0), 24.0));
+        let right = w - 72.0; // preview and pin buttons
+        let popup_w = (right - 38.0 - 4.0 - 28.0 - 6.0 - 100.0).clamp(56.0, 176.0);
+        let star_x = 38.0 + popup_w + 4.0;
+        let search_x = star_x + 34.0;
+        ui.app_popup.setFrame(at(38.0, popup_w));
+        ui.star_btn.setFrame(at(star_x, 28.0));
+        ui.search.setFrame(at(search_x, right - search_x));
+        ui.preview_btn.setFrame(at(w - 66.0, 28.0));
+        ui.pin_btn.setFrame(at(w - 36.0, 28.0));
     }
 
     /// The interface size changed from `old` %: grow or shrink the window by the
@@ -966,6 +985,10 @@ impl App {
             }
             ui.preview.setHidden(false);
             self.apply_scale();
+            // The window may not have grown (already as wide as the screen):
+            // the pane still gets a usable share.
+            let total = ui.split.frame().size.width;
+            left = left.min(total - divider - pane.min(total * 0.52));
             ui.split.adjustSubviews();
             ui.split.setPosition_ofDividerAtIndex(left, 0);
         } else if !open && !ui.preview.isHidden() {
