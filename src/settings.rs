@@ -2,6 +2,16 @@
 
 use crate::db::Db;
 
+/// Interface size stops in percent (slider, ⌘+ / ⌘-): fine steps below 100%.
+pub const UI_SCALES: &[f64] = &[70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0, 110.0, 125.0];
+
+/// Index of the interface size stop closest to `pct`.
+pub fn ui_scale_stop(pct: f64) -> usize {
+    (0..UI_SCALES.len())
+        .min_by(|a, b| (UI_SCALES[*a] - pct).abs().total_cmp(&(UI_SCALES[*b] - pct).abs()))
+        .unwrap_or(6)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// Global shortcut, global-hotkey syntax ("cmd+alt+v").

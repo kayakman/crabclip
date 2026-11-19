@@ -26,7 +26,8 @@ history on crashes).
 | → ← | open / fold the preview pane (or click its button, top right) |
 | ⌘P | pin (window stays open) |
 | Esc | clear search, then close |
-| ⌘, | preferences |
+| ⌘+ / ⌘− / ⌘0 | interface size bigger / smaller / 100% |
+| ⌘, | preferences (again: close them) |
 
 Search: words match anywhere (text, OCR text, app, window title, path, URL;
 case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,

@@ -23,10 +23,10 @@ use objc2_app_kit::{
     NSApplicationActivationPolicy, NSAttributedStringAppKitDocumentFormats, NSButton, NSColor,
     NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSImage, NSImageView,
     NSMenu, NSPasteboard, NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView,
-    NSSearchField, NSSplitView, NSStatusItem, NSTableView, NSTextField, NSTextView, NSUserInterfaceItemIdentification, NSView, NSWorkspace,
+    NSBackgroundColorAttributeName, NSForegroundColorAttributeName, NSSearchField, NSSplitView, NSStatusItem, NSTableView, NSTextField, NSTextView, NSUserInterfaceItemIdentification, NSView, NSWorkspace,
 };
 use objc2_foundation::{
-    NSAttributedString, NSBundle, NSData, NSDistributedNotificationCenter, NSIndexSet,
+    NSAttributedString, NSBundle, NSData, NSDistributedNotificationCenter, NSIndexSet, NSMutableAttributedString,
     NSNotification, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSRunLoopCommonModes, NSString,
     NSTimer, NSUserDefaults,
 };
@@ -661,9 +661,9 @@ impl App {
                     if let Some(s) = s {
                         if let Some(storage) = unsafe { tv.textStorage() } {
                             storage.setAttributedString(&s);
+                            neutral_colors(&storage);
                         }
-                        tv.setDrawsBackground(true);
-                        tv.setBackgroundColor(&NSColor::whiteColor());
+                        tv.setDrawsBackground(false);
                         tv.scrollRangeToVisible(NSRange::new(0, 0));
                         return;
                     }
@@ -945,6 +945,30 @@ impl App {
         self.apply_scale();
     }
 
+    /// ⌘+ / ⌘- step the interface size through its stops; ⌘0 goes to 100%.
+    pub fn zoom(&self, step: i32) {
+        use crate::settings::{UI_SCALES, ui_scale_stop};
+        let old = self.settings.borrow().ui_scale;
+        let new = match step {
+            0 => 100.0,
+            _ => {
+                let i = ui_scale_stop(old) as i32 + step;
+                UI_SCALES[i.clamp(0, UI_SCALES.len() as i32 - 1) as usize]
+            }
+        };
+        if new == old {
+            beep();
+            return;
+        }
+        {
+            let mut s = self.settings.borrow_mut();
+            s.ui_scale = new;
+            s.save(&self.db);
+        }
+        self.rescale_window(old);
+        prefs::sync_scale();
+    }
+
     pub fn toggle_preview(&self) {
         let open = self.settings.borrow().preview_open;
         self.set_preview_open(!open);
@@ -1132,6 +1156,18 @@ impl App {
             }
             "," => {
                 prefs::show();
+                true
+            }
+            "=" | "+" => {
+                self.zoom(1);
+                true
+            }
+            "-" | "_" => {
+                self.zoom(-1);
+                true
+            }
+            "0" => {
+                self.zoom(0);
                 true
             }
             "p" => {
@@ -1430,6 +1466,38 @@ fn is_code_app(bundle: &str) -> bool {
     ["iterm", "terminal", "vscode", "zed", "xcode", "ghostty", "warp", "alacritty", "kitty", "sublime", "jetbrains", "cursor", "nova", "bbedit", "neovim"]
         .iter()
         .any(|k| b.contains(k))
+}
+
+/// Rich text copied from a dark page carries its page colors (white text on
+/// near-black). Keep the formatting but show it like normal text: drop
+/// background colors and turn grey/white/black text into the label colour,
+/// keeping real colours (links, syntax highlighting).
+fn neutral_colors(s: &NSMutableAttributedString) {
+    let len = s.length();
+    let all = NSRange::new(0, len);
+    unsafe { s.removeAttribute_range(NSBackgroundColorAttributeName, all) };
+    let srgb = objc2_app_kit::NSColorSpace::sRGBColorSpace();
+    let label = NSColor::labelColor();
+    let mut grey = Vec::new();
+    let mut i = 0;
+    while i < len {
+        let mut r = NSRange::new(0, 0);
+        let v = unsafe { s.attribute_atIndex_effectiveRange(NSForegroundColorAttributeName, i, &mut r) };
+        let neutral = match v.and_then(|v| v.downcast::<NSColor>().ok()) {
+            Some(c) => c.colorUsingColorSpace(&srgb).is_none_or(|c| {
+                let (r, g, b) = (c.redComponent(), c.greenComponent(), c.blueComponent());
+                r.max(g).max(b) - r.min(g).min(b) < 0.15
+            }),
+            None => true,
+        };
+        if neutral {
+            grey.push(r);
+        }
+        i = (r.location + r.length).max(i + 1);
+    }
+    for r in grey {
+        unsafe { s.addAttribute_value_range(NSForegroundColorAttributeName, &label, r) };
+    }
 }
 
 fn set_text(tv: &NSTextView, text: &str, mono: bool, size: f64) {
