@@ -354,6 +354,17 @@ pub fn build(a: &App) -> Ui {
     date_label.setAlignment(NSTextAlignment::Center);
     date_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     bottom.addSubview(&date_label);
+    // "Clip deleted · Undo" pill, shown instead of the date for a few seconds.
+    let undo_btn = unsafe {
+        NSButton::buttonWithTitle_target_action(&ns("Clip deleted · Undo ⌘Z"), Some(h), Some(sel!(undoDelete:)), mtm)
+    };
+    undo_btn.setBezelStyle(NSBezelStyle::Badge);
+    undo_btn.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    undo_btn.setFrame(rect((w - 180.0) / 2.0, 4.0, 180.0, 20.0));
+    undo_btn.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin);
+    undo_btn.setFocusRingType(NSFocusRingType::None);
+    undo_btn.setHidden(true);
+    bottom.addSubview(&undo_btn);
     let count_label = label(mtm, rect(w - 110.0, 7.0, 100.0, 14.0), 10.0);
     count_label.setAlignment(NSTextAlignment::Right);
     count_label.setTextColor(Some(&NSColor::tertiaryLabelColor()));
@@ -400,6 +411,7 @@ pub fn build(a: &App) -> Ui {
         top_bar: top,
         bottom_bar: bottom,
         date_label,
+        undo_btn,
         count_label,
         text_scroll,
         text_view,

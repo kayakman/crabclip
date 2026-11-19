@@ -23,7 +23,7 @@ history on crashes).
 | ⌘1…⌘9 | the nth clip, like ⏎ |
 | ⌘⏎ | the other one: paste when ⏎ copies, copy when ⏎ pastes |
 | ⌘C | copy to the clipboard |
-| ⌫ | delete clip |
+| ⌫ | delete clip (undo for 4 s: ⌘Z or the pill in the bottom bar) |
 | → ← | open / fold the preview pane (or click its button, top right) |
 | ⌘T | edit the clip's tags (⏎ or Esc: back to the list) |
 | ⌘P | pin (window stays open) |

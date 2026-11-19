@@ -28,6 +28,11 @@ define_class!(
             super::start(self);
         }
 
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _n: &NSNotification) {
+            app().finish_delete();
+        }
+
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
         fn should_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
             app().show();
@@ -171,6 +176,17 @@ define_class!(
             let a = app();
             a.run_search(true);
             a.update_tag_menu();
+        }
+
+        #[unsafe(method(undoDelete:))]
+        fn undo_delete(&self, _s: Option<&AnyObject>) {
+            app().undo_delete();
+        }
+
+        #[unsafe(method(deleteTimeout:))]
+        fn delete_timeout(&self, token: Option<&AnyObject>) {
+            let t: u64 = token.map(|t| unsafe { msg_send![t, unsignedLongLongValue] }).unwrap_or(0);
+            app().delete_timeout(t);
         }
 
         #[unsafe(method(tagsChanged:))]

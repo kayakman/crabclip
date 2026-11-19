@@ -41,6 +41,8 @@ pub const QUIT_NOTIFICATION: &str = "com.rod.cliprust.quit";
 pub const AGENT_LABEL: &str = "com.rod.cliprust.agent";
 pub const PANEL_AUTOSAVE: &str = "cliprust.panel";
 const CACHE_ROWS: usize = 160;
+/// How long a delete can be undone.
+const UNDO_SECONDS: f64 = 4.0;
 const SEARCH_LIMIT: usize = 200_000;
 
 thread_local! {
@@ -75,6 +77,7 @@ pub struct Ui {
     pub top_bar: Retained<NSView>,
     pub bottom_bar: Retained<NSView>,
     pub date_label: Retained<NSTextField>,
+    pub undo_btn: Retained<NSButton>,
     pub count_label: Retained<NSTextField>,
     pub text_scroll: Retained<NSScrollView>,
     pub text_view: Retained<NSTextView>,
@@ -104,6 +107,9 @@ pub struct App {
     /// Clip whose tags the tag field shows (saved there even if the
     /// selection moved before editing ended).
     tags_clip: Cell<i64>,
+    /// A deleted clip that can still be brought back.
+    pending_delete: Cell<Option<i64>>,
+    delete_token: Cell<u64>,
     last_hide: Cell<Option<Instant>>,
     last_prune: Cell<Option<Instant>>,
     seen_apps: RefCell<HashSet<String>>,
@@ -185,6 +191,8 @@ fn start(handler: &Handler) {
         pasting: Cell::new(false),
         modal: Cell::new(false),
         tags_clip: Cell::new(0),
+        pending_delete: Cell::new(None),
+        delete_token: Cell::new(0),
         last_hide: Cell::new(None),
         last_prune: Cell::new(None),
         seen_apps: RefCell::new(HashSet::new()),
@@ -273,6 +281,16 @@ impl App {
         let row: isize = std::env::var("CLIPRUST_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
         self.select_row(row);
         self.update_preview();
+        if std::env::var("CLIPRUST_SNAPSHOT_DELETE").is_ok() {
+            // Shows the undo pill; the process exits before the delete is final.
+            // Never for a starred clip: its confirmation alert would take focus.
+            let starred = self.selected_id().and_then(|id| self.db.row(id).ok().flatten()).is_some_and(|r| r.starred);
+            if starred {
+                log!("snapshot: selected clip is starred, not deleting");
+            } else {
+                self.delete_selected();
+            }
+        }
         if std::env::var("CLIPRUST_SNAPSHOT_TOGGLE").is_ok() {
             // As if → / ← was pressed: fold or open the preview.
             let w = ui.panel.frame().size.width;
@@ -438,6 +456,11 @@ impl App {
     fn on_event(&self, e: Event) {
         match e {
             Event::Ingested(id) | Event::Ocr(id) => {
+                if matches!(e, Event::Ingested(_)) && self.pending_delete.get() == Some(id) {
+                    // Copied again while its delete could still be undone: keep it.
+                    self.pending_delete.set(None);
+                    self.show_undo(false);
+                }
                 self.invalidate(id);
                 let is_ocr = matches!(e, Event::Ocr(_));
                 if is_ocr {
@@ -576,6 +599,8 @@ impl App {
                 log!("search {q:?}: {e}");
                 Vec::new()
             });
+        let pending = self.pending_delete.get();
+        let ids: Vec<i64> = ids.into_iter().filter(|id| Some(*id) != pending).collect();
         let row = prev.and_then(|id| ids.iter().position(|x| *x == id)).unwrap_or(0);
         let n = ids.len();
         *self.ids.borrow_mut() = ids;
@@ -585,15 +610,20 @@ impl App {
             self.select_row(row as isize);
         }
         self.update_preview();
-        let label = if q.is_empty() && !star && app_f.is_none() {
-            format!("{n}")
-        } else {
-            format!("{n} found")
-        };
-        ui.count_label.setStringValue(&NSString::from_str(&label));
+        self.update_count();
         if t0.elapsed().as_millis() > 50 {
             log!("search {q:?}: {n} rows in {:?}", t0.elapsed());
         }
+    }
+
+    fn update_count(&self) {
+        let ui = self.ui();
+        let n = self.ids.borrow().len();
+        let filtered = ui.search.stringValue().length() > 0
+            || self.settings.borrow().star_filter
+            || self.app_filter.borrow().is_some();
+        let label = if filtered { format!("{n} found") } else { format!("{n}") };
+        ui.count_label.setStringValue(&NSString::from_str(&label));
     }
 
     fn select_row(&self, row: isize) {
@@ -1179,6 +1209,8 @@ impl App {
         ui.table.setRowHeight(self.settings.borrow().row_height);
     }
 
+    /// Deleting hides the clip at once; it is really deleted after a few
+    /// seconds unless ⌘Z / the "Undo" pill in the bottom bar brings it back.
     pub fn delete_selected(&self) {
         let Some(id) = self.selected_id() else { return };
         let row = self.ui().table.selectedRow();
@@ -1186,15 +1218,67 @@ impl App {
         if starred && !self.confirm("Delete this starred clip?", "It will be removed from the history for good.", "Delete") {
             return;
         }
-        if let Err(e) = self.db.delete(id) {
-            log!("delete {id}: {e}");
-            return;
-        }
-        self.invalidate(id);
+        self.finish_delete(); // only one undoable delete at a time
+        self.pending_delete.set(Some(id));
+        let token = self.delete_token.get() + 1;
+        self.delete_token.set(token);
         self.ids.borrow_mut().retain(|x| *x != id);
         self.ui().table.reloadData();
         self.select_row(row);
         self.update_preview();
+        self.update_count();
+        self.show_undo(true);
+        let t = objc2_foundation::NSNumber::new_u64(token);
+        unsafe {
+            let _: () = msg_send![&*self.handler, performSelector: sel!(deleteTimeout:), withObject: &*t, afterDelay: UNDO_SECONDS];
+        }
+    }
+
+    pub fn delete_timeout(&self, token: u64) {
+        if token == self.delete_token.get() {
+            self.finish_delete();
+        }
+    }
+
+    /// Really delete the clip whose delete can still be undone, if any.
+    pub fn finish_delete(&self) {
+        if let Some(id) = self.pending_delete.take() {
+            if let Err(e) = self.db.delete(id) {
+                log!("delete {id}: {e}");
+            }
+            self.invalidate(id);
+            self.show_undo(false);
+        }
+    }
+
+    pub fn undo_delete(&self) {
+        let Some(id) = self.pending_delete.take() else { return };
+        self.show_undo(false);
+        let sel = self.selected_id();
+        self.run_search(false);
+        // Back where it was, selected.
+        let pos = self.ids.borrow().iter().position(|x| *x == id);
+        match pos {
+            Some(p) => self.select_row(p as isize),
+            None => {
+                if let Some(p) = sel.and_then(|s| self.ids.borrow().iter().position(|x| *x == s)) {
+                    self.select_row(p as isize);
+                }
+            }
+        }
+        self.update_preview();
+    }
+
+    fn show_undo(&self, on: bool) {
+        let ui = self.ui();
+        ui.undo_btn.setHidden(!on);
+        ui.date_label.setHidden(on);
+    }
+
+    /// Typing in a text field (⌘Z there undoes typing).
+    fn editing_text(&self) -> bool {
+        let ui = self.ui();
+        ui.search.currentEditor().is_some() || ui.tags_field.currentEditor().is_some()
     }
 
     pub fn app_filter_changed(&self) {
@@ -1301,6 +1385,10 @@ impl App {
             "v" => send(sel!(paste:)),
             "a" => send(sel!(selectAll:)),
             "z" if shift => send(sel!(redo:)),
+            "z" if self.pending_delete.get().is_some() && !self.editing_text() => {
+                self.undo_delete();
+                true
+            }
             "z" => send(sel!(undo:)),
             d if d.len() == 1 && ("1"..="9").contains(&d) => {
                 let n: usize = d.parse().unwrap_or(1);
