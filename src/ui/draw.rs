@@ -4,13 +4,13 @@
 use super::app;
 use super::classes::{PillMenu, RowView, TagStrip};
 use crate::db::Kind;
-use objc2::{AnyThread, DefinedClass};
+use objc2::DefinedClass;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
     NSBezierPath, NSColor, NSCompositingOperation, NSFont, NSFontAttributeName,
     NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSAttributedStringNSExtendedStringDrawing, NSAttributedStringNSStringDrawing, NSGradient, NSLineBreakMode,
+    NSAttributedStringNSExtendedStringDrawing, NSAttributedStringNSStringDrawing, NSLineBreakMode,
     NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStringDrawingOptions,
 };
 use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString};
@@ -71,46 +71,85 @@ fn draw_text(text: &str, r: NSRect, font: &NSFont, color: &NSColor, wrap: bool) 
 
 // ------------------------------------------------------------------ pills
 
-fn pill_text(label: &str, h: f64) -> Retained<NSAttributedString> {
-    let font = NSFont::boldSystemFontOfSize((h * 0.6).round());
-    let a = attrs(&font, &NSColor::whiteColor(), false);
+fn dark() -> bool {
+    let name = objc2_app_kit::NSAppearance::currentDrawingAppearance().name().to_string();
+    name.contains("Dark")
+}
+
+fn srgb(r: u8, g: u8, b: u8, a: f64) -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a)
+}
+
+/// Outlined blue tag look: (fill, border, text, count bubble).
+fn pill_colors() -> [Retained<NSColor>; 4] {
+    if dark() {
+        [srgb(70, 130, 230, 0.18), srgb(110, 160, 240, 0.55), srgb(160, 196, 255, 1.0), srgb(110, 160, 240, 0.28)]
+    } else {
+        [srgb(238, 244, 253, 1.0), srgb(160, 190, 236, 1.0), srgb(52, 104, 196, 1.0), srgb(214, 228, 250, 1.0)]
+    }
+}
+
+fn pill_text(label: &str, h: f64, color: &NSColor) -> Retained<NSAttributedString> {
+    let font = NSFont::systemFontOfSize_weight((h * 0.6).round(), 0.23); // medium
+    let a = attrs(&font, color, false);
     unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(label), &a) }
 }
 
-pub fn pill_width(label: &str, lock: bool, h: f64) -> f64 {
-    let tw = pill_text(label, h).size().width.ceil();
-    tw + h * 0.9 + if lock { h * 0.7 } else { 0.0 }
+fn count_width(count: Option<i64>, h: f64) -> f64 {
+    match count {
+        Some(n) => pill_text(&n.to_string(), h, &NSColor::labelColor()).size().width.ceil() + h * 0.7 + h * 0.3,
+        None => 0.0,
+    }
 }
 
-/// A glassy blue tag pill with its top-left at `at`; returns its width.
+pub fn pill_width(label: &str, lock: bool, h: f64) -> f64 {
+    pill_width_n(label, lock, h, None)
+}
+
+fn pill_width_n(label: &str, lock: bool, h: f64, count: Option<i64>) -> f64 {
+    let tw = pill_text(label, h, &NSColor::labelColor()).size().width.ceil();
+    let pad = h * 0.55;
+    tw + pad * 2.0 + if lock { h * 0.65 } else { 0.0 } + count_width(count, h) - if count.is_some() { pad * 0.5 } else { 0.0 }
+}
+
+/// A tag pill with its top-left at `at`; returns its width.
 pub fn pill(label: &str, lock: bool, at: NSPoint, h: f64) -> f64 {
-    let w = pill_width(label, lock, h);
-    let r = NSRect::new(at, NSSize::new(w, h));
-    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, h / 2.0, h / 2.0);
-    let top = NSColor::colorWithSRGBRed_green_blue_alpha(0.45, 0.70, 1.0, 0.95);
-    let bottom = NSColor::colorWithSRGBRed_green_blue_alpha(0.05, 0.38, 0.92, 0.95);
-    if let Some(g) = NSGradient::initWithStartingColor_endingColor(NSGradient::alloc(), &top, &bottom) {
-        g.drawInBezierPath_angle(&path, 90.0);
-    }
-    // Gloss over the top half, and a light rim.
-    let gr = NSRect::new(NSPoint::new(at.x + 1.5, at.y + 1.0), NSSize::new(w - 3.0, h * 0.46));
-    let gloss = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(gr, h * 0.23, h * 0.23);
-    NSColor::colorWithWhite_alpha(1.0, 0.22).setFill();
-    gloss.fill();
-    NSColor::colorWithWhite_alpha(1.0, 0.5).setStroke();
-    path.setLineWidth(0.6);
+    pill_n(label, lock, at, h, None)
+}
+
+/// A tag pill, optionally with a count bubble inside on the right.
+fn pill_n(label: &str, lock: bool, at: NSPoint, h: f64, count: Option<i64>) -> f64 {
+    let [fill, border, text, bubble] = pill_colors();
+    let w = pill_width_n(label, lock, h, count);
+    let r = NSRect::new(NSPoint::new(at.x + 0.5, at.y + 0.5), NSSize::new(w - 1.0, h - 1.0));
+    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, (h - 1.0) / 2.0, (h - 1.0) / 2.0);
+    fill.setFill();
+    path.fill();
+    border.setStroke();
+    path.setLineWidth(1.0);
     path.stroke();
-    let mut x = at.x + h * 0.45;
+    let mut x = at.x + h * 0.55;
     if lock {
-        if let Some(img) = tinted_symbol("lock.fill", &NSColor::whiteColor(), (h * 0.5).round()) {
+        if let Some(img) = tinted_symbol("lock.fill", &text, (h * 0.48).round()) {
             let sz = img.size();
             draw_image(&img, NSRect::new(NSPoint::new(x, at.y + (h - sz.height) / 2.0), sz));
         }
-        x += h * 0.7;
+        x += h * 0.65;
     }
-    let t = pill_text(label, h);
-    let th = t.size().height;
-    t.drawAtPoint(NSPoint::new(x, at.y + (h - th) / 2.0));
+    let t = pill_text(label, h, &text);
+    let ts = t.size();
+    t.drawAtPoint(NSPoint::new(x, at.y + (h - ts.height) / 2.0));
+    if let Some(n) = count {
+        let c = pill_text(&n.to_string(), h, &text);
+        let cs = c.size();
+        let bh = h - 6.0;
+        let bw = cs.width.ceil() + h * 0.7;
+        let bx = at.x + w - 3.0 - bw;
+        let br = NSRect::new(NSPoint::new(bx, at.y + 3.0), NSSize::new(bw, bh));
+        bubble.setFill();
+        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(br, bh / 2.0, bh / 2.0).fill();
+        c.drawAtPoint(NSPoint::new(bx + (bw - cs.width) / 2.0, at.y + (h - cs.height) / 2.0));
+    }
     w
 }
 
@@ -122,23 +161,27 @@ pub fn tag_strip(v: &TagStrip) {
         draw_text("Tags (⌘T) · “password” encrypts the clip", b, &f, &NSColor::placeholderTextColor(), false);
         return;
     }
-    let h = 18.0;
+    let h = 20.0;
     let mut x = 0.0;
     for t in tags.iter() {
         let lock = t == crate::db::PASSWORD;
         if x + pill_width(t, lock, h) > b.size.width {
             break;
         }
-        x += pill(t, lock, NSPoint::new(x, (b.size.height - h) / 2.0), h) + 5.0;
+        x += pill(t, lock, NSPoint::new(x, (b.size.height - h) / 2.0), h) + 6.0;
     }
 }
 
 const MENU_PAD: f64 = 6.0;
-const MENU_ROW: f64 = 28.0;
+const MENU_ROW: f64 = 30.0;
+const MENU_PILL: f64 = 22.0;
 
 pub fn pill_menu_size(items: &[(String, i64)]) -> NSSize {
-    let widest = items.iter().map(|(t, _)| pill_width(t, t == crate::db::PASSWORD, 18.0)).fold(0.0, f64::max);
-    NSSize::new((widest + 90.0).max(200.0), MENU_PAD * 2.0 + MENU_ROW * items.len() as f64)
+    let widest = items
+        .iter()
+        .map(|(t, n)| pill_width_n(t, t == crate::db::PASSWORD, MENU_PILL, Some(*n)))
+        .fold(0.0, f64::max);
+    NSSize::new((widest + 56.0).max(160.0), MENU_PAD * 2.0 + MENU_ROW * items.len() as f64)
 }
 
 pub fn pill_menu_item_at(y: f64) -> Option<usize> {
@@ -155,20 +198,11 @@ pub fn pill_menu(v: &PillMenu) {
     let small = NSFont::systemFontOfSize(11.0);
     for (i, (name, count)) in v.ivars().items.borrow().iter().enumerate() {
         let y = MENU_PAD + i as f64 * MENU_ROW;
-        pill(name, name == crate::db::PASSWORD, NSPoint::new(10.0, y + (MENU_ROW - 18.0) / 2.0), 18.0);
-        let hint = if i == 0 { format!("{count}   ⇥") } else { count.to_string() };
-        let r = NSRect::new(NSPoint::new(b.size.width - 70.0, y), NSSize::new(60.0, MENU_ROW));
-        let para = NSMutableParagraphStyle::new();
-        para.setAlignment(objc2_app_kit::NSTextAlignment::Right);
-        let a = unsafe {
-            NSDictionary::from_slices(
-                &[NSFontAttributeName, NSForegroundColorAttributeName, NSParagraphStyleAttributeName],
-                &[&*small as &AnyObject, &*NSColor::secondaryLabelColor() as &AnyObject, &*para as &AnyObject],
-            )
-        };
-        let s = unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(&hint), &a) };
-        let th = s.size().height;
-        s.drawInRect(NSRect::new(NSPoint::new(r.origin.x, y + (MENU_ROW - th) / 2.0), NSSize::new(r.size.width, th)));
+        pill_n(name, name == crate::db::PASSWORD, NSPoint::new(10.0, y + (MENU_ROW - MENU_PILL) / 2.0), MENU_PILL, Some(*count));
+        if i == 0 {
+            let r = NSRect::new(NSPoint::new(b.size.width - 34.0, y), NSSize::new(24.0, MENU_ROW));
+            draw_text("⇥", r, &small, &NSColor::tertiaryLabelColor(), false);
+        }
     }
 }
 
