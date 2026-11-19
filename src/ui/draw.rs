@@ -11,7 +11,8 @@ use objc2_app_kit::{
     NSBezierPath, NSColor, NSCompositingOperation, NSFont, NSFontAttributeName,
     NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
     NSAttributedStringNSExtendedStringDrawing, NSAttributedStringNSStringDrawing, NSLineBreakMode,
-    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStringDrawingOptions,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStringDrawingOptions, NSTableRowView,
+    NSWindingRule,
 };
 use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
@@ -80,9 +81,12 @@ fn srgb(r: u8, g: u8, b: u8, a: f64) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a)
 }
 
-/// Outlined blue tag look: (fill, border, text, count bubble).
-fn pill_colors() -> [Retained<NSColor>; 4] {
-    if dark() {
+/// Outlined blue tag look: (fill, border, text, count bubble). White on a
+/// selected row, where blue on the selection blue doesn't read.
+fn pill_colors(on_selection: bool) -> [Retained<NSColor>; 4] {
+    if on_selection {
+        [srgb(255, 255, 255, 0.16), srgb(255, 255, 255, 0.7), srgb(255, 255, 255, 1.0), srgb(255, 255, 255, 0.25)]
+    } else if dark() {
         [srgb(70, 130, 230, 0.18), srgb(110, 160, 240, 0.55), srgb(160, 196, 255, 1.0), srgb(110, 160, 240, 0.28)]
     } else {
         [srgb(238, 244, 253, 1.0), srgb(160, 190, 236, 1.0), srgb(52, 104, 196, 1.0), srgb(214, 228, 250, 1.0)]
@@ -113,13 +117,13 @@ fn pill_width_n(label: &str, lock: bool, h: f64, count: Option<i64>) -> f64 {
 }
 
 /// A tag pill with its top-left at `at`; returns its width.
-pub fn pill(label: &str, lock: bool, at: NSPoint, h: f64) -> f64 {
-    pill_n(label, lock, at, h, None)
+pub fn pill(label: &str, lock: bool, at: NSPoint, h: f64, on_selection: bool) -> f64 {
+    pill_n(label, lock, at, h, None, on_selection)
 }
 
 /// A tag pill, optionally with a count bubble inside on the right.
-fn pill_n(label: &str, lock: bool, at: NSPoint, h: f64, count: Option<i64>) -> f64 {
-    let [fill, border, text, bubble] = pill_colors();
+fn pill_n(label: &str, lock: bool, at: NSPoint, h: f64, count: Option<i64>, on_selection: bool) -> f64 {
+    let [fill, border, text, bubble] = pill_colors(on_selection);
     let w = pill_width_n(label, lock, h, count);
     let r = NSRect::new(NSPoint::new(at.x + 0.5, at.y + 0.5), NSSize::new(w - 1.0, h - 1.0));
     let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, (h - 1.0) / 2.0, (h - 1.0) / 2.0);
@@ -168,7 +172,7 @@ pub fn tag_strip(v: &TagStrip) {
         if x + pill_width(t, lock, h) > b.size.width {
             break;
         }
-        x += pill(t, lock, NSPoint::new(x, (b.size.height - h) / 2.0), h) + 6.0;
+        x += pill(t, lock, NSPoint::new(x, (b.size.height - h) / 2.0), h, false) + 6.0;
     }
 }
 
@@ -198,7 +202,7 @@ pub fn pill_menu(v: &PillMenu) {
     let small = NSFont::systemFontOfSize(11.0);
     for (i, (name, count)) in v.ivars().items.borrow().iter().enumerate() {
         let y = MENU_PAD + i as f64 * MENU_ROW;
-        pill_n(name, name == crate::db::PASSWORD, NSPoint::new(10.0, y + (MENU_ROW - MENU_PILL) / 2.0), MENU_PILL, Some(*count));
+        pill_n(name, name == crate::db::PASSWORD, NSPoint::new(10.0, y + (MENU_ROW - MENU_PILL) / 2.0), MENU_PILL, Some(*count), false);
         if i == 0 {
             let r = NSRect::new(NSPoint::new(b.size.width - 34.0, y), NSSize::new(24.0, MENU_ROW));
             draw_text("⇥", r, &small, &NSColor::tertiaryLabelColor(), false);
@@ -211,7 +215,12 @@ pub fn row(v: &RowView) {
     let a = app();
     let Some(d) = a.row_data(id) else { return };
     let b = v.bounds();
-    let sel = v.ivars().selected.get();
+    // Ask the row: setBackgroundStyle: doesn't always arrive before drawing (a
+    // selected row drew as unselected in dark mode: blue links on the blue).
+    let sel = match unsafe { v.superview() }.and_then(|s| s.downcast::<NSTableRowView>().ok()) {
+        Some(r) => r.isSelected(),
+        None => v.ivars().selected.get(),
+    };
     let (w, h) = (b.size.width, b.size.height);
 
     let icon = a.app_icon(&d.info);
@@ -222,6 +231,32 @@ pub fn row(v: &RowView) {
     let font_size = a.settings.borrow().font_size;
     let font = NSFont::systemFontOfSize(font_size);
     let sealed = d.info.tags.iter().any(|t| t == crate::db::PASSWORD);
+
+    // Tag pills, bottom right of the clip. The clip is drawn around them, not
+    // under a patch of guessed background color (it showed as a dark halo).
+    let ph = (16.0 * font_size / 13.0).round();
+    let right = content.origin.x + content.size.width;
+    let mut fits = Vec::new();
+    let mut x = right;
+    for t in d.info.tags.iter() {
+        let lock = t == crate::db::PASSWORD;
+        let pw = pill_width(t, lock, ph);
+        if x - pw < content.origin.x + 40.0 {
+            break;
+        }
+        x -= pw;
+        fits.push((t, lock, x));
+        x -= 4.0;
+    }
+    let py = h - 5.0 - ph;
+    NSGraphicsContext::saveGraphicsState_class();
+    if !fits.is_empty() {
+        let hole = NSRect::new(NSPoint::new(x - 2.0, py - 3.0), NSSize::new(right - x + 6.0, ph + 6.0));
+        let clip = NSBezierPath::bezierPathWithRect(b);
+        clip.appendBezierPath(&NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(hole, (ph + 6.0) / 2.0, (ph + 6.0) / 2.0));
+        clip.setWindingRule(NSWindingRule::EvenOdd);
+        clip.addClip();
+    }
 
     match d.info.kind {
         _ if sealed => {
@@ -278,30 +313,9 @@ pub fn row(v: &RowView) {
         }
     }
 
-    // Tag pills, bottom right of the clip, on a backing so text doesn't show through.
-    let ph = (16.0 * font_size / 13.0).round();
-    let right = content.origin.x + content.size.width;
-    let mut fits = Vec::new();
-    let mut x = right;
-    for t in d.info.tags.iter() {
-        let lock = t == crate::db::PASSWORD;
-        let pw = pill_width(t, lock, ph);
-        if x - pw < content.origin.x + 40.0 {
-            break;
-        }
-        x -= pw;
-        fits.push((t, lock, x));
-        x -= 4.0;
-    }
-    if !fits.is_empty() {
-        let y = h - 5.0 - ph;
-        let back = NSRect::new(NSPoint::new(x - 2.0, y - 3.0), NSSize::new(right - x + 6.0, ph + 6.0));
-        let bg = if sel { NSColor::selectedContentBackgroundColor() } else { NSColor::windowBackgroundColor() };
-        bg.setFill();
-        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(back, (ph + 6.0) / 2.0, (ph + 6.0) / 2.0).fill();
-        for (t, lock, px) in fits {
-            pill(t, lock, NSPoint::new(px, y), ph);
-        }
+    NSGraphicsContext::restoreGraphicsState_class();
+    for (t, lock, px) in fits {
+        pill(t, lock, NSPoint::new(px, py), ph, sel);
     }
 
     let star = if d.info.starred {

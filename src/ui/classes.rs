@@ -301,6 +301,24 @@ define_class!(
             }
         }
 
+        // Separators only between real rows, not ruled down the empty space
+        // below the last one.
+        #[unsafe(method(drawGridInClipRect:))]
+        fn draw_grid(&self, clip: NSRect) {
+            let n = self.numberOfRows();
+            if n > 0 {
+                let last = self.rectOfRow(n - 1);
+                let bottom = last.origin.y + last.size.height;
+                let mut r = clip;
+                r.size.height = (bottom - r.origin.y).min(r.size.height);
+                if r.size.height > 0.0 {
+                    unsafe {
+                        let _: () = msg_send![super(self), drawGridInClipRect: r];
+                    }
+                }
+            }
+        }
+
         #[unsafe(method(copy:))]
         fn copy(&self, _s: Option<&AnyObject>) {
             app().copy_selected();

@@ -273,6 +273,11 @@ impl App {
     /// CLIPRUST_SNAPSHOT_QUERY / _ROW pick what is displayed.
     fn snapshot(&self, out: &str) {
         let ui = self.ui();
+        // CLIPRUST_SNAPSHOT_APPEARANCE=dark|light instead of the system's.
+        if let Ok(look) = std::env::var("CLIPRUST_SNAPSHOT_APPEARANCE") {
+            let name = unsafe { if look == "dark" { objc2_app_kit::NSAppearanceNameDarkAqua } else { objc2_app_kit::NSAppearanceNameAqua } };
+            NSApplication::sharedApplication(self.mtm).setAppearance(objc2_app_kit::NSAppearance::appearanceNamed(name).as_deref());
+        }
         self.rebuild_app_popup();
         let q = std::env::var("CLIPRUST_SNAPSHOT_QUERY").unwrap_or_default();
         ui.search.setStringValue(&NSString::from_str(&q));
@@ -643,6 +648,15 @@ impl App {
     }
 
     pub fn selection_changed(&self) {
+        // Rows draw their selected look themselves; don't count on
+        // setBackgroundStyle: to make them redraw.
+        let t = &self.ui().table;
+        let vis = t.rowsInRect(t.visibleRect());
+        for r in vis.location..vis.location + vis.length {
+            if let Some(v) = t.viewAtColumn_row_makeIfNecessary(0, r as isize, false) {
+                v.setNeedsDisplay(true);
+            }
+        }
         self.update_preview();
     }
 
