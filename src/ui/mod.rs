@@ -193,7 +193,7 @@ fn start(handler: &Handler) {
     let _ = a.ui.set(ui);
     a.apply_buttons();
     a.apply_scale();
-    a.apply_preview();
+    a.apply_preview(false);
 
     if let Ok(out) = std::env::var("CLIPRUST_SNAPSHOT") {
         a.snapshot(&out);
@@ -260,6 +260,12 @@ impl App {
         let row: isize = std::env::var("CLIPRUST_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
         self.select_row(row);
         self.update_preview();
+        if std::env::var("CLIPRUST_SNAPSHOT_TOGGLE").is_ok() {
+            // As if → / ← was pressed: fold or open the preview.
+            let w = ui.panel.frame().size.width;
+            self.toggle_preview();
+            log!("snapshot: preview toggled, window {w} -> {}, list {} split {}", ui.panel.frame().size.width, ui.list.frame().size.width, ui.split.frame().size.width);
+        }
         if std::env::var("CLIPRUST_SNAPSHOT_LIVE").is_ok() {
             // Real compositing, far off every screen and never key: nothing
             // shows and no keystroke can land in it.
@@ -889,7 +895,9 @@ impl App {
         ui.top_bar.setFrame(r(h - build::TOP, build::TOP));
         ui.split.setFrame(r(build::BOTTOM, h - build::TOP - build::BOTTOM));
         ui.bottom_bar.setFrame(r(0.0, build::BOTTOM));
-        ui.panel.setMinSize(NSSize::new(460.0 * k, 280.0 * k));
+        // Folded, the window is only the list.
+        let min_w = if ui.preview.isHidden() { 300.0 } else { 460.0 };
+        ui.panel.setMinSize(NSSize::new(min_w * k, 280.0 * k));
     }
 
     /// The interface size changed from `old` %: grow or shrink the window by the
@@ -906,40 +914,79 @@ impl App {
         self.apply_scale();
     }
 
+    pub fn toggle_preview(&self) {
+        let open = self.settings.borrow().preview_open;
+        self.set_preview_open(!open);
+    }
+
     pub fn set_preview_open(&self, open: bool) {
         {
             let mut s = self.settings.borrow_mut();
             s.preview_open = open;
             s.save(&self.db);
         }
-        self.apply_preview();
+        self.apply_preview(true);
         if open {
             self.update_preview();
         }
     }
 
-    /// Folds or unfolds the preview pane to match the setting. A hidden split
-    /// subview is collapsed; the divider goes back where it was on unfolding.
-    pub fn apply_preview(&self) {
+    /// Folds or unfolds the preview pane to match the setting. The list keeps
+    /// its width: the window shrinks by the pane's width when it folds (the
+    /// pane slides under the list) and grows to the right when it opens,
+    /// moving left only if it would run off the screen. With `resize` false
+    /// (at launch, to repair an autosaved split that disagrees with the
+    /// setting) the pane folds or opens inside the window as it is.
+    pub fn apply_preview(&self, resize: bool) {
         let ui = self.ui();
         let open = self.settings.borrow().preview_open;
         let defaults = NSUserDefaults::standardUserDefaults();
-        let key = NSString::from_str("cliprust.listWidth");
+        let key = NSString::from_str("cliprust.previewWidth");
+        let k = self.settings.borrow().ui_scale / 100.0;
+        let divider = ui.split.dividerThickness();
+        let list_w = ui.list.frame().size.width;
+        let mut f = ui.panel.frame();
         if open && ui.preview.isHidden() {
-            let total = ui.split.frame().size.width;
             let saved = defaults.doubleForKey(&key);
-            let left = if saved > 150.0 && saved < total - 150.0 { saved } else { (total * 0.48).round() };
+            let pane = if saved >= 200.0 { saved } else { list_w.max(320.0) };
+            let mut left = list_w;
+            if resize {
+                f.size.width = ((list_w + divider + pane) * k).round();
+                if let Some(vis) = ui.panel.screen().map(|s| s.visibleFrame()) {
+                    let over = f.origin.x + f.size.width - (vis.origin.x + vis.size.width);
+                    if over > 0.0 {
+                        f.origin.x = (f.origin.x - over).max(vis.origin.x);
+                        f.size.width = f.size.width.min(vis.size.width);
+                    }
+                }
+                ui.panel.setFrame_display(f, ui.panel.isVisible());
+            } else {
+                let total = ui.split.frame().size.width;
+                left = (total - pane - divider).max(total * 0.48).round();
+            }
             ui.preview.setHidden(false);
+            self.apply_scale();
             ui.split.adjustSubviews();
             ui.split.setPosition_ofDividerAtIndex(left, 0);
         } else if !open && !ui.preview.isHidden() {
-            defaults.setDouble_forKey(ui.list.frame().size.width, &key);
+            let pane = ui.preview.frame().size.width;
+            defaults.setDouble_forKey(pane, &key);
             ui.preview.setHidden(true);
+            if resize {
+                // Borderless sideways: the window is the list plus the divider
+                // a collapsed split view still keeps at its edge.
+                f.size.width = ((list_w + divider) * k).round();
+                ui.panel.setFrame_display(f, ui.panel.isVisible());
+            }
+            self.apply_scale();
             ui.split.adjustSubviews();
         }
-        let (symbol, tip) = if open { ("sidebar.right", "Hide preview (←)") } else { ("sidebar.right", "Show preview (→)") };
-        let color = if open { NSColor::secondaryLabelColor() } else { NSColor::tertiaryLabelColor() };
-        ui.preview_btn.setImage(draw::tinted_symbol(symbol, &color, 14.0).as_deref());
+        let (tip, color) = if open {
+            ("Hide preview (←)", NSColor::secondaryLabelColor())
+        } else {
+            ("Show preview (→)", NSColor::tertiaryLabelColor())
+        };
+        ui.preview_btn.setImage(draw::tinted_symbol("sidebar.right", &color, 14.0).as_deref());
         ui.preview_btn.setToolTip(Some(&NSString::from_str(tip)));
     }
 

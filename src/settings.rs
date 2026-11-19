@@ -74,7 +74,7 @@ impl Settings {
             move_to_top: flag("move_to_top", d.move_to_top),
             ocr: flag("ocr", d.ocr),
             row_height: get("row_height").and_then(|v| v.parse().ok()).unwrap_or(d.row_height),
-            ui_scale: get("ui_scale").and_then(|v| v.parse().ok()).unwrap_or(d.ui_scale).clamp(75.0, 200.0),
+            ui_scale: get("ui_scale").and_then(|v| v.parse().ok()).unwrap_or(d.ui_scale).clamp(50.0, 200.0),
             font_size: get("font_size").and_then(|v| v.parse().ok()).unwrap_or(d.font_size).clamp(9.0, 28.0),
             preview_open: flag("preview_open", d.preview_open),
             img_scale_pct: get("img_scale_pct")

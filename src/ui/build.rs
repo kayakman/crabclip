@@ -161,7 +161,7 @@ pub fn build(a: &App) -> Ui {
     panel.setHidesOnDeactivate(false);
     unsafe { panel.setReleasedWhenClosed(false) };
     panel.setMovableByWindowBackground(true);
-    panel.setMinSize(NSSize::new(460.0, 280.0));
+    panel.setMinSize(NSSize::new(300.0, 280.0)); // apply_scale sets the real one
     panel.setDelegate(Some(ProtocolObject::from_ref(&*a.handler)));
     panel.setFrameUsingName(&ns(PANEL_AUTOSAVE));
     panel.setFrameAutosaveName(&ns(PANEL_AUTOSAVE));

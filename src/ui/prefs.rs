@@ -20,6 +20,8 @@ const OPEN_AT: &[(&str, &str)] = &[
 ];
 const ROWS: &[(f64, &str)] = &[(52.0, "Compact"), (72.0, "Normal"), (96.0, "Large"), (128.0, "Huge")];
 const FONTS: &[f64] = &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0];
+/// Interface size slider stops, in percent (fine steps below 100%).
+const SCALES: &[f64] = &[70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0, 110.0, 125.0];
 const ZSTD: &[(i32, &str)] = &[(3, "Fast (zstd 3)"), (9, "Balanced (zstd 9)"), (19, "Smallest (zstd 19)")];
 const KEEP: &[(u32, &str)] = &[(0, "Forever"), (365, "1 year"), (180, "6 months"), (90, "90 days"), (30, "30 days")];
 
@@ -181,10 +183,17 @@ pub fn show() {
 
     f.label("Interface size:");
     let scale = unsafe {
-        NSSlider::sliderWithValue_minValue_maxValue_target_action(s.ui_scale, 75.0, 200.0, Some(target), Some(sel!(prefChanged:)), mtm)
+        NSSlider::sliderWithValue_minValue_maxValue_target_action(
+            scale_stop(s.ui_scale) as f64,
+            0.0,
+            (SCALES.len() - 1) as f64,
+            Some(target),
+            Some(sel!(prefChanged:)),
+            mtm,
+        )
     };
     scale.setFrame(rect(220.0, f.y, 230.0, 24.0));
-    scale.setNumberOfTickMarks(6);
+    scale.setNumberOfTickMarks(SCALES.len() as isize);
     scale.setAllowsTickMarkValuesOnly(true);
     scale.setContinuous(false);
     view.addSubview(&scale);
@@ -280,6 +289,13 @@ fn refresh_status() {
     });
 }
 
+/// Index of the slider stop closest to `pct`.
+fn scale_stop(pct: f64) -> usize {
+    (0..SCALES.len())
+        .min_by(|a, b| (SCALES[*a] - pct).abs().total_cmp(&(SCALES[*b] - pct).abs()))
+        .unwrap_or(6)
+}
+
 fn on(b: &NSButton) -> bool {
     b.state() == NSControlStateValueOn
 }
@@ -295,7 +311,11 @@ pub fn changed(_sender: Option<&AnyObject>) {
         s.open_at = OPEN_AT.get(p.open_at.indexOfSelectedItem().max(0) as usize).map(|x| x.0).unwrap_or("last").into();
         s.row_height = ROWS.get(p.rows.indexOfSelectedItem().max(0) as usize).map(|x| x.0).unwrap_or(72.0);
         s.font_size = FONTS.get(p.font.indexOfSelectedItem().max(0) as usize).copied().unwrap_or(13.0);
-        s.ui_scale = (p.scale.doubleValue() / 25.0).round() * 25.0;
+        let stop = (p.scale.doubleValue().round().max(0.0) as usize).min(SCALES.len() - 1);
+        // Leave a size set outside the stops alone until the slider moves off it.
+        if stop != scale_stop(old.ui_scale) {
+            s.ui_scale = SCALES[stop];
+        }
         p.scale_label.setStringValue(&ns(&format!("{}%", s.ui_scale)));
         s.launch_at_login = on(&p.login);
         s.move_to_top = on(&p.move_top);

@@ -32,7 +32,7 @@ Search: words match anywhere (text, OCR text, app, window title, path, URL;
 case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,
 `app:chrome`, `type:image|text|url|file`, `is:star`.
 
-Preferences also set the text size and an interface size slider (75–200%)
+Preferences also set the text size and an interface size slider (70–125%, in 5% steps below 100%)
 that zooms the whole window: text, rows, icons and the window itself.
 
 ## Build

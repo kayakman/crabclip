@@ -123,8 +123,7 @@ define_class!(
 
         #[unsafe(method(togglePreview:))]
         fn toggle_preview(&self, _s: Option<&AnyObject>) {
-            let a = app();
-            a.set_preview_open(!a.settings.borrow().preview_open);
+            app().toggle_preview();
         }
 
         #[unsafe(method(appFilterChanged:))]
