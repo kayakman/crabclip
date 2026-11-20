@@ -16,6 +16,8 @@ pub fn ui_scale_stop(pct: f64) -> usize {
 pub struct Settings {
     /// Global shortcut, global-hotkey syntax ("cmd+alt+v").
     pub hotkey: String,
+    /// Global shortcut that opens straight into the snippet folders ("" = none).
+    pub folder_hotkey: String,
     /// Where the window opens: "last" position, under the "menubar" icon, or at the "mouse".
     pub open_at: String,
     pub launch_at_login: bool,
@@ -46,6 +48,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             hotkey: "cmd+alt+v".into(),
+            folder_hotkey: String::new(),
             open_at: "last".into(),
             launch_at_login: true,
             move_to_top: true,
@@ -82,6 +85,7 @@ impl Settings {
         let flag = |k: &str, def: bool| get(k).map(|v| v == "1").unwrap_or(def);
         Settings {
             hotkey: get("hotkey").unwrap_or(d.hotkey),
+            folder_hotkey: get("folder_hotkey").unwrap_or(d.folder_hotkey),
             open_at: get("open_at").unwrap_or(d.open_at),
             launch_at_login: flag("launch_at_login", d.launch_at_login),
             move_to_top: flag("move_to_top", d.move_to_top),
@@ -111,6 +115,7 @@ impl Settings {
     pub fn save(&self, db: &Db) {
         let pairs = [
             ("hotkey", self.hotkey.clone()),
+            ("folder_hotkey", self.folder_hotkey.clone()),
             ("open_at", self.open_at.clone()),
             ("launch_at_login", b(self.launch_at_login)),
             ("move_to_top", b(self.move_to_top)),

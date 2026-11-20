@@ -6,6 +6,7 @@ fn usage() {
         "crabclip {} — forever clipboard history\n\n\
          Usage:\n  crabclip                         run the menu bar app\n  \
          crabclip --import-collective [archive...]   import Collective.app history (default: its container)\n  \
+         crabclip --import-clipy [file]   import Clipy's history and snippets (its sqlite.db, or a snippets XML export)\n  \
          crabclip --stats                 print database stats\n  \
          crabclip --search <query>        search from the terminal",
         env!("CARGO_PKG_VERSION")
@@ -55,6 +56,29 @@ fn main() {
             }
             let _ = db.vacuum_some();
             println!("{}", summary.join("\n"));
+        }
+        Some("--import-clipy") => {
+            let db = Db::open(&Db::default_path()).expect("open db");
+            let settings = Settings::load(&db);
+            let Some(path) = args.get(1).map(std::path::PathBuf::from).or_else(crabclip::clipy::default_db) else {
+                println!("No Clipy database found. Open the current Clipy once (it converts older data), or pass a snippets XML export.");
+                std::process::exit(1);
+            };
+            let mut last = std::time::Instant::now();
+            let r = crabclip::clipy::import(&path, &db, &settings, |st| {
+                if last.elapsed().as_secs() >= 2 {
+                    last = std::time::Instant::now();
+                    eprintln!("  {}/{} history clips", st.added + st.merged + st.skipped, st.history);
+                }
+            });
+            let _ = db.vacuum_some();
+            match r {
+                Ok(st) => println!("{}", st.summary()),
+                Err(e) => {
+                    println!("{}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
         }
         Some("--stats") => {
             let db = Db::open(&Db::default_path()).expect("open db");

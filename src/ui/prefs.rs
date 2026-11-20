@@ -27,6 +27,7 @@ const KEEP: &[(u32, &str)] = &[(0, "Forever"), (365, "1 year"), (180, "6 months"
 struct Prefs {
     window: Retained<NSWindow>,
     hotkey: Retained<NSTextField>,
+    folder_hotkey: Retained<NSTextField>,
     open_at: Retained<NSPopUpButton>,
     login: Retained<NSButton>,
     move_top: Retained<NSButton>,
@@ -155,7 +156,7 @@ pub fn show() {
         return;
     }
     let s = a.settings.borrow().clone();
-    let (w, h) = (580.0, 788.0);
+    let (w, h) = (580.0, 858.0);
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -178,6 +179,15 @@ pub fn show() {
     }
     hotkey.setTag(101);
     f.button(376.0, 80.0, "Set", 101);
+    f.y -= 30.0;
+    f.label("Show folders with:");
+    let folder_hotkey = f.field(220.0, 150.0, &s.folder_hotkey);
+    folder_hotkey.setPlaceholderString(Some(&ns("none: type / in the history")));
+    unsafe {
+        folder_hotkey.setAction(Some(sel!(prefAction:)));
+    }
+    folder_hotkey.setTag(106);
+    f.button(376.0, 80.0, "Set", 106);
     f.y -= 30.0;
     f.note("e.g. cmd+alt+v, ctrl+shift+space, cmd+shift+KeyC");
 
@@ -245,6 +255,8 @@ pub fn show() {
     f.y -= 30.0;
     f.button(216.0, 150.0, "Reveal in Finder", 102);
     f.button(370.0, 190.0, "Import Collective history", 103);
+    f.y -= 34.0;
+    f.button(370.0, 190.0, "Import from Clipy…", 105);
     f.y -= 40.0;
 
     f.label("Accessibility:");
@@ -261,6 +273,7 @@ pub fn show() {
         *p.borrow_mut() = Some(Prefs {
             window: window.clone(),
             hotkey,
+            folder_hotkey,
             open_at,
             login,
             move_top,
@@ -465,6 +478,26 @@ pub fn action(sender: Option<&AnyObject>) {
                 }
             }
         }
+        106 => {
+            let spec = PREFS.with(|p| p.borrow().as_ref().map(|p| p.folder_hotkey.stringValue().to_string()));
+            let Some(spec) = spec else { return };
+            let old = a.settings.borrow().folder_hotkey.clone();
+            a.settings.borrow_mut().folder_hotkey = spec.trim().to_string();
+            match a.register_hotkey() {
+                Ok(()) => a.settings.borrow().save(&a.db),
+                Err(e) => {
+                    a.settings.borrow_mut().folder_hotkey = old.clone();
+                    let _ = a.register_hotkey();
+                    PREFS.with(|p| {
+                        if let Some(p) = p.borrow().as_ref() {
+                            p.folder_hotkey.setStringValue(&ns(&old));
+                        }
+                    });
+                    a.confirm("Cannot use that shortcut", &e, "OK");
+                }
+            }
+        }
+        105 => import_clipy(),
         102 => {
             let url = NSURL::fileURLWithPath(&ns(&crate::db::Db::default_path().display().to_string()));
             NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
@@ -482,8 +515,26 @@ pub fn action(sender: Option<&AnyObject>) {
     }
 }
 
-/// Runs the importer as a child process (it loads the whole archive in memory,
-/// which is then given back to the system when it exits).
+/// Runs an importer as a child process (they can load a whole archive in
+/// memory, which goes back to the system when it exits), then reports.
+fn run_import(args: Vec<String>, title: &'static str) {
+    let exe = std::env::current_exe().unwrap_or_default();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(exe).args(&args).output();
+        let msg = match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Err(e) => format!("failed: {e}"),
+        };
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let a = app();
+            a.invalidate_all();
+            a.run_search(true);
+            refresh_status();
+            a.confirm(title, &msg, "OK");
+        });
+    });
+}
+
 fn import_collective() {
     let paths = crate::collective::default_paths();
     if paths.is_empty() {
@@ -497,19 +548,52 @@ fn import_collective() {
     ) {
         return;
     }
-    let exe = std::env::current_exe().unwrap_or_default();
-    std::thread::spawn(move || {
-        let out = std::process::Command::new(exe).arg("--import-collective").output();
-        let msg = match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            Err(e) => format!("failed: {e}"),
-        };
-        dispatch2::DispatchQueue::main().exec_async(move || {
-            let a = app();
-            a.invalidate_all();
-            a.run_search(true);
-            refresh_status();
-            a.confirm("Collective import finished", &msg, "OK");
-        });
-    });
+    run_import(vec!["--import-collective".into()], "Collective import finished");
+}
+
+const CLIPY_TEXT: &str = "Its history (every format of each clip) and its snippet folders, in Clipy's order. \
+     Clips already in crabclip are merged, not duplicated; you can import again later.";
+
+/// Preferences › Import from Clipy: its database, or a file picked by hand.
+fn import_clipy() {
+    let a = app();
+    let path = match crate::clipy::default_db() {
+        Some(p) => p,
+        None => {
+            let msg = if crate::clipy::legacy_realm().is_some() {
+                "This Mac has data from an older Clipy. Open the current Clipy once (it converts its data), \
+                 or choose a snippets export (Clipy › Edit Snippets… › Export)."
+            } else {
+                "Clipy's database wasn't found. Choose its sqlite.db or a snippets export \
+                 (Clipy › Edit Snippets… › Export)."
+            };
+            if !a.confirm("Import from Clipy", msg, "Choose File…") {
+                return;
+            }
+            let panel = objc2_app_kit::NSOpenPanel::openPanel(a.mtm);
+            panel.setCanChooseFiles(true);
+            panel.setCanChooseDirectories(false);
+            panel.setAllowsMultipleSelection(false);
+            panel.setMessage(Some(&ns("Clipy's sqlite.db or a snippets .xml export")));
+            if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+                return;
+            }
+            let Some(p) = panel.URL().and_then(|u| u.path()) else { return };
+            std::path::PathBuf::from(p.to_string())
+        }
+    };
+    if !a.confirm("Import from Clipy?", CLIPY_TEXT, "Import") {
+        return;
+    }
+    run_import(vec!["--import-clipy".into(), path.display().to_string()], "Clipy import finished");
+}
+
+/// Asked once, at a launch that finds Clipy's database.
+pub fn offer_clipy() {
+    let a = app();
+    let Some(path) = crate::clipy::default_db() else { return };
+    let _ = a.db.set_setting("clipy_asked", "1");
+    if a.confirm("Bring in your Clipy history and snippets?", CLIPY_TEXT, "Import") {
+        run_import(vec!["--import-clipy".into(), path.display().to_string()], "Clipy import finished");
+    }
 }

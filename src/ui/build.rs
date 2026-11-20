@@ -290,6 +290,30 @@ pub fn build(a: &App) -> Ui {
     let tag_strip = TagStrip::new(mtm, rect(30.0, 4.0, pw - 40.0, 22.0));
     tag_strip.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin);
     preview.addSubview(&tag_strip);
+    // Folders the clip is filed in (⌘L), above the tags.
+    let folders_y = tags_h;
+    let folder_icon = NSImageView::initWithFrame(NSImageView::alloc(mtm), rect(10.0, folders_y + 3.0, 16.0, 16.0));
+    folder_icon.setImage(draw::tinted_symbol("folder", &NSColor::secondaryLabelColor(), 12.0).as_deref());
+    folder_icon.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMaxYMargin);
+    preview.addSubview(&folder_icon);
+    let folders_field = NSTokenField::initWithFrame(NSTokenField::alloc(mtm), rect(30.0, folders_y, pw - 40.0, 22.0));
+    folders_field.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin);
+    folders_field.setPlaceholderString(Some(&ns("Folders (⌘L) · e.g. Clients/ssh · type / to browse them")));
+    folders_field.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    folders_field.setBordered(false);
+    folders_field.setDrawsBackground(false);
+    folders_field.setFocusRingType(NSFocusRingType::None);
+    unsafe {
+        folders_field.setDelegate(Some(ProtocolObject::from_ref(&*a.handler)));
+        folders_field.setTarget(Some(h));
+        folders_field.setAction(Some(sel!(foldersChanged:)));
+    }
+    if let Some(cell) = folders_field.cell() {
+        cell.setSendsActionOnEndEditing(true);
+    }
+    folders_field.setTokenStyle(objc2_app_kit::NSTokenStyle::Squared);
+    preview.addSubview(&folders_field);
+    let tags_h = tags_h + 26.0;
     let meta_h = 96.0 + tags_h;
     let meta = NSTextField::wrappingLabelWithString(&ns(""), mtm);
     meta.setFrame(rect(10.0, tags_h + 2.0, pw - 20.0, meta_h - tags_h - 6.0));
@@ -405,6 +429,7 @@ pub fn build(a: &App) -> Ui {
         preview,
         zoom,
         tags_field,
+        folders_field,
         tag_strip,
         tag_menu,
         tag_menu_view,

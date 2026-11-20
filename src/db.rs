@@ -65,6 +65,23 @@ CREATE TABLE IF NOT EXISTS tags(
 );
 CREATE INDEX IF NOT EXISTS tags_tag ON tags(tag, clip_id);
 
+-- Folders of snippets, nested; a clip can be filed in several of them.
+CREATE TABLE IF NOT EXISTS folders(
+  id     INTEGER PRIMARY KEY,
+  parent INTEGER NOT NULL DEFAULT 0,     -- 0: top level
+  name   TEXT NOT NULL COLLATE NOCASE,
+  pos    INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(parent, name)
+);
+CREATE TABLE IF NOT EXISTS snippets(
+  folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+  clip_id   INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+  title     TEXT NOT NULL DEFAULT '',  -- name in the folder ('' shows the clip's text)
+  pos       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(folder_id, clip_id)
+);
+CREATE INDEX IF NOT EXISTS snippets_clip ON snippets(clip_id);
+
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
@@ -85,6 +102,27 @@ pub const SEALED_PREVIEW: &str = "••••••••";
 /// "  #My Tag " -> "my-tag"
 pub fn normalize_tag(t: &str) -> String {
     t.trim().trim_start_matches('#').split_whitespace().collect::<Vec<_>>().join("-").to_lowercase()
+}
+
+/// "/ Clients /ssh/ " -> ["Clients", "ssh"]
+pub fn folder_parts(path: &str) -> Vec<String> {
+    path.split('/').map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|p| !p.is_empty()).collect()
+}
+
+/// What a folder holds: subfolders first, then its snippets.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Entry {
+    Folder { id: i64, name: String, items: i64 },
+    Snippet { clip_id: i64, title: String },
+}
+
+impl Entry {
+    pub fn label(&self) -> &str {
+        match self {
+            Entry::Folder { name, .. } => name,
+            Entry::Snippet { title, .. } => title,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -202,6 +240,10 @@ pub struct Detail {
     pub img_h: i64,
     pub starred: bool,
     pub tags: Vec<String>,
+    /// Folder paths the clip is filed in ("Clients/ssh").
+    pub folders: Vec<String>,
+    /// Its name in a folder, if it was given one.
+    pub title: Option<String>,
 }
 
 impl Detail {
@@ -536,6 +578,9 @@ impl Db {
         }
         let mut meta = meta.into_iter().flatten().collect::<Vec<_>>();
         meta.extend(tags);
+        meta.extend(Self::folder_paths_of(conn, id)?);
+        let mut st = conn.prepare_cached("SELECT title FROM snippets WHERE clip_id=? AND title<>''")?;
+        meta.extend(st.query_map([id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>>>()?);
         let meta = meta.join("\n");
         conn.execute("INSERT INTO fts(rowid, body, meta) VALUES(?,?,?)", params![id, body, meta])?;
         Ok(())
@@ -646,10 +691,27 @@ impl Db {
                         img_h: r.get(18)?,
                         starred: r.get(19)?,
                         tags: split_tags(r.get(20)?),
+                        folders: Vec::new(),
+                        title: None,
                     })
                 },
             )
             .optional()
+            .and_then(|d| match d {
+                Some(mut d) => {
+                    d.folders = Self::folder_paths_of(&self.conn, d.id)?;
+                    d.title = self
+                        .conn
+                        .query_row(
+                            "SELECT title FROM snippets WHERE clip_id=? AND title<>'' ORDER BY folder_id LIMIT 1",
+                            [d.id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    Ok(Some(d))
+                }
+                None => Ok(None),
+            })
     }
 
     /// All representations, decompressed, in pasteboard order.
@@ -706,19 +768,21 @@ impl Db {
         tx.execute("DELETE FROM fts WHERE rowid=?", [id])?;
         tx.execute("DELETE FROM reps WHERE clip_id=?", [id])?;
         tx.execute("DELETE FROM tags WHERE clip_id=?", [id])?;
+        tx.execute("DELETE FROM snippets WHERE clip_id=?", [id])?;
         tx.execute("DELETE FROM clips WHERE id=?", [id])?;
         tx.commit()
     }
 
-    /// Delete clips last copied before `before_ms` (None: all). Starred clips are
-    /// kept unless `include_starred`. Returns the number deleted.
+    /// Delete clips last copied before `before_ms` (None: all). Starred clips and
+    /// clips filed in folders are kept unless `include_starred`. Returns the
+    /// number deleted.
     pub fn clear(&self, before_ms: Option<i64>, include_starred: bool) -> Result<usize> {
         let mut cond = String::from("1");
         if let Some(b) = before_ms {
             cond += &format!(" AND copied_at < {b}");
         }
         if !include_starred {
-            cond += " AND starred=0";
+            cond += " AND starred=0 AND id NOT IN (SELECT clip_id FROM snippets)";
         }
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(&format!("DELETE FROM fts WHERE rowid IN (SELECT id FROM clips WHERE {cond})"), [])?;
@@ -728,6 +792,10 @@ impl Db {
         )?;
         tx.execute(
             &format!("DELETE FROM tags WHERE clip_id IN (SELECT id FROM clips WHERE {cond})"),
+            [],
+        )?;
+        tx.execute(
+            &format!("DELETE FROM snippets WHERE clip_id IN (SELECT id FROM clips WHERE {cond})"),
             [],
         )?;
         let n = tx.execute(&format!("DELETE FROM clips WHERE {cond}"), [])?;
@@ -977,6 +1045,203 @@ impl Db {
             e => e.to_string(),
         })?;
         Ok(())
+    }
+
+    // --------------------------------------------------------------- folders
+
+    /// The folder at `path` ("A/B"), created (with its parents) if `create`.
+    /// The top level is 0.
+    fn folder_at(conn: &Connection, path: &str, create: bool) -> Result<Option<i64>> {
+        let mut id = 0;
+        for name in folder_parts(path) {
+            let found: Option<i64> = conn
+                .query_row("SELECT id FROM folders WHERE parent=? AND name=?", params![id, name], |r| r.get(0))
+                .optional()?;
+            id = match found {
+                Some(f) => f,
+                None if create => {
+                    conn.execute(
+                        "INSERT INTO folders(parent, name, pos) \
+                         VALUES(?1, ?2, (SELECT COALESCE(MAX(pos), -1) + 1 FROM folders WHERE parent=?1))",
+                        params![id, name],
+                    )?;
+                    conn.last_insert_rowid()
+                }
+                None => return Ok(None),
+            };
+        }
+        Ok(Some(id))
+    }
+
+    pub fn folder_id(&self, path: &str) -> Result<Option<i64>> {
+        Self::folder_at(&self.conn, path, false)
+    }
+
+    /// The folder at `path`, created if needed.
+    pub fn make_folder(&self, path: &str) -> Result<i64> {
+        Ok(Self::folder_at(&self.conn, path, true)?.unwrap_or(0))
+    }
+
+    /// "A/B" for a folder id ("" for the top level).
+    pub fn folder_path(&self, id: i64) -> Result<String> {
+        Self::path_of(&self.conn, id)
+    }
+
+    fn path_of(conn: &Connection, mut id: i64) -> Result<String> {
+        let mut names = Vec::new();
+        while id != 0 && names.len() < 64 {
+            let (parent, name): (i64, String) =
+                conn.query_row("SELECT parent, name FROM folders WHERE id=?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            names.push(name);
+            id = parent;
+        }
+        names.reverse();
+        Ok(names.join("/"))
+    }
+
+    fn folder_paths_of(conn: &Connection, clip: i64) -> Result<Vec<String>> {
+        let ids: Vec<i64> = {
+            let mut st = conn.prepare_cached("SELECT folder_id FROM snippets WHERE clip_id=?")?;
+            st.query_map([clip], |r| r.get(0))?.collect::<Result<_>>()?
+        };
+        let mut paths = ids.into_iter().map(|f| Self::path_of(conn, f)).collect::<Result<Vec<_>>>()?;
+        paths.sort_by_key(|p| p.to_lowercase());
+        Ok(paths)
+    }
+
+    /// Folder paths a clip is filed in.
+    pub fn folders_of(&self, clip: i64) -> Result<Vec<String>> {
+        Self::folder_paths_of(&self.conn, clip)
+    }
+
+    /// File a clip in exactly these folders (created as needed). Folders left
+    /// empty by it are removed. Returns the clip's folder paths.
+    pub fn set_folders(&self, clip: i64, paths: &[String]) -> Result<Vec<String>> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        let mut want = Vec::new();
+        for p in paths {
+            if let Some(f) = Self::folder_at(&tx, p, true)?.filter(|f| *f != 0) {
+                if !want.contains(&f) {
+                    want.push(f);
+                }
+            }
+        }
+        let have: Vec<i64> = {
+            let mut st = tx.prepare("SELECT folder_id FROM snippets WHERE clip_id=?")?;
+            st.query_map([clip], |r| r.get(0))?.collect::<Result<_>>()?
+        };
+        for f in have.iter().filter(|f| !want.contains(f)) {
+            tx.execute("DELETE FROM snippets WHERE folder_id=? AND clip_id=?", params![f, clip])?;
+            Self::prune_folder(&tx, *f)?;
+        }
+        for f in want.iter().filter(|f| !have.contains(f)) {
+            Self::add_snippet(&tx, *f, clip, "", None)?;
+        }
+        Self::reindex(&tx, clip)?;
+        tx.commit()?;
+        self.folders_of(clip)
+    }
+
+    /// Put a clip in a folder (or rename it there). `pos` None: at the end.
+    pub fn file_snippet(&self, folder: i64, clip: i64, title: &str, pos: Option<i64>) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        Self::add_snippet(&tx, folder, clip, title, pos)?;
+        Self::reindex(&tx, clip)?;
+        tx.commit()
+    }
+
+    fn add_snippet(conn: &Connection, folder: i64, clip: i64, title: &str, pos: Option<i64>) -> Result<()> {
+        conn.execute(
+            "INSERT INTO snippets(folder_id, clip_id, title, pos) \
+             VALUES(?1, ?2, ?3, COALESCE(?4, (SELECT COALESCE(MAX(pos), -1) + 1 FROM snippets WHERE folder_id=?1))) \
+             ON CONFLICT(folder_id, clip_id) DO UPDATE SET title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE title END, \
+             pos=COALESCE(?4, pos)",
+            params![folder, clip, title, pos],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a folder that holds nothing anymore, and its parents likewise.
+    fn prune_folder(conn: &Connection, mut id: i64) -> Result<()> {
+        while id != 0 {
+            let used: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM snippets WHERE folder_id=?1) OR EXISTS(SELECT 1 FROM folders WHERE parent=?1)",
+                [id],
+                |r| r.get(0),
+            )?;
+            if used {
+                break;
+            }
+            let parent: i64 = conn.query_row("SELECT parent FROM folders WHERE id=?", [id], |r| r.get(0))?;
+            conn.execute("DELETE FROM folders WHERE id=?", [id])?;
+            id = parent;
+        }
+        Ok(())
+    }
+
+    /// Set a folder's place among its siblings (importers keep their order).
+    pub fn set_folder_pos(&self, id: i64, pos: i64) -> Result<()> {
+        self.conn.execute("UPDATE folders SET pos=? WHERE id=?", params![pos, id])?;
+        Ok(())
+    }
+
+    /// What `folder` (0: top level) holds: subfolders, then snippets, each in
+    /// their order. `filter` keeps the ones whose name contains it (any case).
+    pub fn folder_entries(&self, folder: i64, filter: &str) -> Result<Vec<Entry>> {
+        let f = filter.to_lowercase();
+        let keep = |s: &str| f.is_empty() || s.to_lowercase().contains(&f);
+        let mut out = Vec::new();
+        let mut st = self.conn.prepare_cached(
+            "SELECT id, name, (SELECT COUNT(*) FROM folders c WHERE c.parent=f.id) + \
+             (SELECT COUNT(*) FROM snippets s WHERE s.folder_id=f.id) FROM folders f WHERE parent=? ORDER BY pos, name",
+        )?;
+        for e in st.query_map([folder], |r| Ok(Entry::Folder { id: r.get(0)?, name: r.get(1)?, items: r.get(2)? }))? {
+            let e = e?;
+            if keep(e.label()) {
+                out.push(e);
+            }
+        }
+        let mut st = self.conn.prepare_cached(
+            "SELECT s.clip_id, s.title, c.preview FROM snippets s JOIN clips c ON c.id=s.clip_id \
+             WHERE s.folder_id=? ORDER BY s.pos, s.title COLLATE NOCASE, c.copied_at DESC",
+        )?;
+        for e in st.query_map([folder], |r| {
+            let title: String = r.get(1)?;
+            let preview: String = r.get(2)?;
+            let title = if title.is_empty() { preview.lines().next().unwrap_or("").trim().to_string() } else { title };
+            Ok(Entry::Snippet { clip_id: r.get(0)?, title })
+        })? {
+            let e = e?;
+            if keep(e.label()) {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every folder path with how many snippets it holds, in tree order.
+    pub fn all_folder_paths(&self) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(i64, i64, String, i64)> = {
+            let mut st = self.conn.prepare(
+                "SELECT id, parent, name, (SELECT COUNT(*) FROM snippets s WHERE s.folder_id=f.id) FROM folders f ORDER BY pos, name",
+            )?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_>>()?
+        };
+        fn walk(rows: &[(i64, i64, String, i64)], parent: i64, prefix: &str, out: &mut Vec<(String, i64)>, depth: usize) {
+            if depth > 64 {
+                return;
+            }
+            for (id, p, name, n) in rows {
+                if *p == parent {
+                    let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+                    out.push((path.clone(), *n));
+                    walk(rows, *id, &path, out, depth + 1);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&rows, 0, "", &mut out, 0);
+        Ok(out)
     }
 
     pub fn count(&self) -> Result<i64> {

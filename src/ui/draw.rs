@@ -210,9 +210,57 @@ pub fn pill_menu(v: &PillMenu) {
     }
 }
 
+/// A row while browsing folders: icon, name, and for a folder its item
+/// count and a chevron.
+fn entry_row(v: &RowView, e: &crate::db::Entry, sel: bool) {
+    let a = app();
+    let b = v.bounds();
+    let (w, h) = (b.size.width, b.size.height);
+    let fs = a.settings.borrow().font_size;
+    let fg = if sel { NSColor::alternateSelectedControlTextColor() } else { NSColor::labelColor() };
+    let dim = if sel { NSColor::alternateSelectedControlTextColor() } else { NSColor::tertiaryLabelColor() };
+    let (sym, folder) = match e {
+        crate::db::Entry::Folder { .. } => ("folder", true),
+        crate::db::Entry::Snippet { .. } => ("doc.text", false),
+    };
+    let tint = if sel { NSColor::alternateSelectedControlTextColor() } else { NSColor::secondaryLabelColor() };
+    if let Some(img) = tinted_symbol(sym, &tint, (fs + 2.0).round()) {
+        let sz = img.size();
+        draw_image(&img, NSRect::new(NSPoint::new(14.0 + (22.0 - sz.width) / 2.0, (h - sz.height) / 2.0), sz));
+    }
+    let mut right = w - 12.0;
+    if let crate::db::Entry::Folder { items, .. } = e {
+        if let Some(chev) = tinted_symbol("chevron.right", &fg, (fs - 1.0).round()) {
+            let sz = chev.size();
+            right -= sz.width;
+            draw_image(&chev, NSRect::new(NSPoint::new(right, (h - sz.height) / 2.0), sz));
+            right -= 8.0;
+        }
+        let small = NSFont::systemFontOfSize(fs - 2.0);
+        let n = items.to_string();
+        let nw = (n.len() as f64 * (fs - 2.0) * 0.62).ceil() + 4.0;
+        right -= nw;
+        draw_text(&n, NSRect::new(NSPoint::new(right, 0.0), NSSize::new(nw, h)), &small, &dim, false);
+        right -= 6.0;
+    }
+    let font = if folder { NSFont::systemFontOfSize_weight(fs, 0.23) } else { NSFont::systemFontOfSize(fs) };
+    let x = 46.0;
+    draw_text(e.label(), NSRect::new(NSPoint::new(x, 0.0), NSSize::new((right - x).max(10.0), h)), &font, &fg, false);
+}
+
 pub fn row(v: &RowView) {
     let id = v.ivars().clip.get();
     let a = app();
+    if a.in_folders() {
+        if let Some(e) = a.entry(id) {
+            let sel = match unsafe { v.superview() }.and_then(|s| s.downcast::<NSTableRowView>().ok()) {
+                Some(r) => r.isSelected(),
+                None => v.ivars().selected.get(),
+            };
+            entry_row(v, &e, sel);
+            return;
+        }
+    }
     let Some(d) = a.row_data(id) else { return };
     let b = v.bounds();
     // Ask the row: setBackgroundStyle: doesn't always arrive before drawing (a

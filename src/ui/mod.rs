@@ -4,6 +4,7 @@
 mod build;
 pub mod classes;
 mod draw;
+pub mod folders;
 pub mod prefs;
 
 use crate::db::{Db, Detail, Filter, Kind, RowInfo};
@@ -71,6 +72,7 @@ pub struct Ui {
     pub preview: Retained<NSView>,
     pub zoom: Retained<NSView>,
     pub tags_field: Retained<objc2_app_kit::NSTokenField>,
+    pub folders_field: Retained<objc2_app_kit::NSTokenField>,
     pub tag_strip: Retained<classes::TagStrip>,
     pub tag_menu: Retained<objc2_app_kit::NSPanel>,
     pub tag_menu_view: Retained<classes::PillMenu>,
@@ -101,7 +103,16 @@ pub struct App {
     last_change: Cell<isize>,
     prev_app: RefCell<Option<Retained<NSRunningApplication>>>,
     app_filter: RefCell<Option<String>>,
-    hotkey: RefCell<Option<(GlobalHotKeyManager, Option<HotKey>)>>,
+    hotkey: RefCell<Option<(GlobalHotKeyManager, Vec<HotKey>)>>,
+    folder_hotkey_id: Cell<u32>,
+    /// Folder mode (the search starts with "/"): the folder listed (-1: none
+    /// at that path) and what each row is.
+    folder: Cell<Option<i64>>,
+    entries: RefCell<HashMap<i64, crate::db::Entry>>,
+    /// Row id to select after the next search (going back up a folder).
+    select_after: Cell<Option<i64>>,
+    /// Clip whose folders the folder field shows.
+    folders_clip: Cell<i64>,
     pasting: Cell<bool>,
     modal: Cell<bool>,
     /// Clip whose tags the tag field shows (saved there even if the
@@ -191,6 +202,11 @@ fn start(handler: &Handler) {
         prev_app: RefCell::new(None),
         app_filter: RefCell::new(None),
         hotkey: RefCell::new(None),
+        folder_hotkey_id: Cell::new(0),
+        folder: Cell::new(None),
+        entries: RefCell::new(HashMap::new()),
+        select_after: Cell::new(None),
+        folders_clip: Cell::new(0),
         pasting: Cell::new(false),
         modal: Cell::new(false),
         tags_clip: Cell::new(0),
@@ -262,6 +278,9 @@ fn start(handler: &Handler) {
         let _ = a.db.set_setting("ax_prompted", "1");
         crate::ax::prompt();
     }
+    if a.db.get_setting("clipy_asked").is_none() && crate::clipy::default_db().is_some() {
+        DispatchQueue::main().exec_async(prefs::offer_clipy);
+    }
     let _ = a.jobs.send(Job::Prune);
     a.last_prune.set(Some(Instant::now()));
     log!("ready: {} clips", a.db.count().unwrap_or(0));
@@ -289,6 +308,14 @@ impl App {
         let row: isize = std::env::var("CRABCLIP_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
         self.select_row(row);
         self.update_preview();
+        // Arrow keys as the list gets them: r → l ← u ↑ d ↓.
+        for k in std::env::var("CRABCLIP_SNAPSHOT_KEYS").unwrap_or_default().chars() {
+            match k {
+                'r' | 'l' => self.arrow(k == 'r'),
+                'u' | 'd' => self.move_selection(if k == 'd' { 1 } else { -1 }),
+                _ => {}
+            }
+        }
         if std::env::var("CRABCLIP_SNAPSHOT_DELETE").is_ok() {
             // Shows the undo pill; the process exits before the delete is final.
             // Never for a starred clip: its confirmation alert would take focus.
@@ -341,36 +368,59 @@ impl App {
 
     // ---------------------------------------------------------------- hotkey
 
+    /// (Re)register the global shortcuts: the history and, if set, the
+    /// snippet folders.
     pub fn register_hotkey(&self) -> Result<(), String> {
-        let spec = self.settings.borrow().hotkey.clone();
+        let (spec, fspec) = {
+            let s = self.settings.borrow();
+            (s.hotkey.clone(), s.folder_hotkey.trim().to_string())
+        };
         let hk: HotKey = spec.parse().map_err(|e| format!("bad shortcut {spec:?}: {e}"))?;
+        let fhk: Option<HotKey> = if fspec.is_empty() {
+            None
+        } else {
+            Some(fspec.parse().map_err(|e| format!("bad shortcut {fspec:?}: {e}"))?)
+        };
+        if fhk.is_some_and(|f| f.id() == hk.id()) {
+            return Err("The history and the folders need different shortcuts.".into());
+        }
         let mut slot = self.hotkey.borrow_mut();
         if slot.is_none() {
             let m = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
             GlobalHotKeyEvent::set_event_handler(Some(|e: GlobalHotKeyEvent| {
                 if e.state == HotKeyState::Pressed {
-                    DispatchQueue::main().exec_async(|| app().hotkey_pressed());
+                    let id = e.id;
+                    DispatchQueue::main().exec_async(move || app().hotkey_pressed(id));
                 }
             }));
-            *slot = Some((m, None));
+            *slot = Some((m, Vec::new()));
         }
         let (m, current) = slot.as_mut().unwrap();
-        if let Some(old) = current.take() {
+        for old in current.drain(..) {
             let _ = m.unregister(old);
         }
+        self.folder_hotkey_id.set(0);
         m.register(hk).map_err(|e| format!("cannot register {spec}: {e}"))?;
-        *current = Some(hk);
-        log!("hotkey: {spec}");
+        current.push(hk);
+        if let Some(f) = fhk {
+            m.register(f).map_err(|e| format!("cannot register {fspec}: {e}"))?;
+            current.push(f);
+            self.folder_hotkey_id.set(f.id());
+        }
+        log!("hotkey: {spec}{}", if fspec.is_empty() { String::new() } else { format!(", folders: {fspec}") });
         if let Some(btn) = self.ui.get().and_then(|ui| ui.status_item.button(self.mtm)) {
             btn.setToolTip(Some(&NSString::from_str(&format!("crabclip — {}", hotkey_label(&spec)))));
         }
         Ok(())
     }
 
-    fn hotkey_pressed(&self) {
+    fn hotkey_pressed(&self, id: u32) {
+        let folders = id != 0 && id == self.folder_hotkey_id.get();
         let p = &self.ui().panel;
-        if p.isVisible() && p.isKeyWindow() {
+        if p.isVisible() && p.isKeyWindow() && folders == self.in_folders() {
             self.hide();
+        } else if folders {
+            self.show_folders();
         } else {
             self.show();
         }
@@ -581,7 +631,13 @@ impl App {
 
     // ----------------------------------------------------------------- list
 
+    /// The selected clip (not a folder row).
     pub fn selected_id(&self) -> Option<i64> {
+        self.selected_row_id().filter(|id| *id > 0)
+    }
+
+    /// What the selected row shows: a clip id, or minus a folder id.
+    pub fn selected_row_id(&self) -> Option<i64> {
         let row = self.ui().table.selectedRow();
         if row < 0 {
             return None;
@@ -598,21 +654,30 @@ impl App {
         let q = ui.search.stringValue().to_string();
         let star = self.settings.borrow().star_filter;
         let app_f = self.app_filter.borrow().clone();
-        let prev = if reset_selection { None } else { self.selected_id() };
+        let prev = self.select_after.take().or(if reset_selection { None } else { self.selected_row_id() });
         let t0 = Instant::now();
-        let ids = self
-            .db
-            .search(&Filter { query: &q, starred: star, app: app_f.as_deref() }, SEARCH_LIMIT)
-            .unwrap_or_else(|e| {
-                log!("search {q:?}: {e}");
-                Vec::new()
-            });
+        let ids = if let Some(fq) = crate::query::parse_folder_query(&q) {
+            self.folder_ids(&fq)
+        } else {
+            self.folder.set(None);
+            self.entries.borrow_mut().clear();
+            self.db
+                .search(&Filter { query: &q, starred: star, app: app_f.as_deref() }, SEARCH_LIMIT)
+                .unwrap_or_else(|e| {
+                    log!("search {q:?}: {e}");
+                    Vec::new()
+                })
+        };
         let pending = self.pending_delete.get();
         let ids: Vec<i64> = ids.into_iter().filter(|id| Some(*id) != pending).collect();
         let row = prev.and_then(|id| ids.iter().position(|x| *x == id)).unwrap_or(0);
         let n = ids.len();
         *self.ids.borrow_mut() = ids;
         self.dirty.set(false);
+        let row_h = if self.in_folders() { self.folder_row_height() } else { self.settings.borrow().row_height };
+        if ui.table.rowHeight() != row_h {
+            ui.table.setRowHeight(row_h);
+        }
         ui.table.reloadData();
         if n > 0 {
             self.select_row(row as isize);
@@ -630,7 +695,9 @@ impl App {
         let filtered = ui.search.stringValue().length() > 0
             || self.settings.borrow().star_filter
             || self.app_filter.borrow().is_some();
-        let label = if self.settings.borrow().star_filter {
+        let label = if self.in_folders() {
+            format!("{n} item{}", if n == 1 { "" } else { "s" })
+        } else if self.settings.borrow().star_filter {
             format!("{n} starred only")
         } else if filtered {
             format!("{n} found")
@@ -683,6 +750,10 @@ impl App {
 
     pub fn update_preview(&self) {
         let ui = self.ui();
+        if let Some(fid) = self.selected_row_id().filter(|id| *id < 0).map(|id| -id) {
+            self.show_folder_preview(fid);
+            return;
+        }
         let Some(id) = self.selected_id() else {
             ui.image_view.setImage(None);
             ui.image_view.setHidden(true);
@@ -691,10 +762,15 @@ impl App {
             ui.meta.setStringValue(&NSString::from_str(""));
             ui.date_label.setStringValue(&NSString::from_str(""));
             self.set_tags_field(None, &[]);
+            self.set_folders_field(None, &[]);
+            if let Some(path) = self.folder_label() {
+                ui.date_label.setStringValue(&NSString::from_str(&path));
+            }
             return;
         };
         let Ok(Some(d)) = self.db.detail(id) else { return };
         self.set_tags_field(Some(id), &d.tags);
+        self.set_folders_field(Some(id), &d.folders);
         ui.date_label.setStringValue(&NSString::from_str(&timefmt::human(d.copied_at)));
         if !self.settings.borrow().preview_open {
             return; // filled in when the pane opens
@@ -885,11 +961,15 @@ impl App {
     /// ⏎, double-click, ⌘1…9: paste or only copy, per the "⏎ pastes"
     /// preference; `other` (⌘⏎) does the opposite.
     pub fn enter(&self, plain: bool, other: bool) {
-        let Some(id) = self.selected_id() else { return };
+        let Some(id) = self.selected_row_id() else { return };
         self.enter_id(id, plain, other);
     }
 
     fn enter_id(&self, id: i64, plain: bool, other: bool) {
+        if id < 0 {
+            self.open_folder(-id);
+            return;
+        }
         let paste = self.settings.borrow().enter_pastes != other;
         self.paste_id(id, plain, paste);
     }
@@ -1373,6 +1453,10 @@ impl App {
                 self.focus_tags();
                 true
             }
+            "l" => {
+                self.focus_folders();
+                true
+            }
             "p" => {
                 self.toggle_pin();
                 true
@@ -1463,7 +1547,7 @@ impl App {
                 return true;
             }
             123 | 124 => {
-                self.set_preview_open(code == 124);
+                self.arrow(code == 124);
                 return true;
             }
             _ => {}
@@ -1476,10 +1560,6 @@ impl App {
                 if let Some(id) = self.selected_id() {
                     self.toggle_star(id);
                 }
-                true
-            }
-            "/" => {
-                ui.panel.makeFirstResponder(Some(&ui.search));
                 true
             }
             c if c.chars().count() == 1 && c.chars().all(|ch| !ch.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&ch)) => {
@@ -1563,7 +1643,7 @@ impl App {
     /// or the selection is reset.
     fn commit_tag_edit(&self) {
         let ui = self.ui();
-        if ui.tags_field.currentEditor().is_some() {
+        if ui.tags_field.currentEditor().is_some() || ui.folders_field.currentEditor().is_some() {
             ui.panel.makeFirstResponder(Some(&ui.table));
         }
     }
@@ -1632,7 +1712,7 @@ impl App {
     pub fn update_tag_menu(&self) {
         let ui = self.ui();
         let text = ui.search.stringValue().to_string();
-        if text.is_empty() || text.ends_with(char::is_whitespace) {
+        if text.is_empty() || text.ends_with(char::is_whitespace) || text.starts_with('/') {
             self.hide_tag_menu();
             return;
         }
@@ -1707,7 +1787,7 @@ impl App {
 
     pub fn search_command(&self, control: &NSControl, sel: Sel) -> bool {
         let ui = self.ui();
-        if is_obj(Some(control), &*ui.tags_field) {
+        if is_obj(Some(control), &*ui.tags_field) || is_obj(Some(control), &*ui.folders_field) {
             // Esc / Tab leave the tag field (ending the edit saves it).
             if sel == sel!(cancelOperation:) || sel == sel!(insertTab:) || sel == sel!(insertBacktab:) {
                 ui.panel.makeFirstResponder(Some(&ui.table));
@@ -1730,6 +1810,16 @@ impl App {
                 self.hide_tag_menu();
                 return true;
             }
+        }
+        if (sel == sel!(moveRight:) || sel == sel!(moveLeft:)) && self.in_folders() && self.caret_at_end() {
+            let text = ui.search.stringValue().to_string();
+            if sel == sel!(moveRight:) && self.open_selected_folder() {
+                return true;
+            }
+            if sel == sel!(moveLeft:) && text.ends_with('/') && self.folder_up() {
+                return true;
+            }
+            return false;
         }
         let shift = NSApplication::sharedApplication(self.mtm)
             .currentEvent()
@@ -1969,6 +2059,9 @@ fn set_text(tv: &NSTextView, text: &str, mono: bool, size: f64) {
 
 fn meta_text(d: &Detail) -> String {
     let mut lines = Vec::new();
+    if let Some(t) = &d.title {
+        lines.push(format!("Snippet “{t}”"));
+    }
     let app = d.app_name.clone().unwrap_or_else(|| "Unknown app".into());
     match &d.window_title {
         Some(t) => lines.push(format!("{} — {}", app.trim_start_matches('\u{200e}'), t)),

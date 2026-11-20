@@ -92,8 +92,12 @@ define_class!(
 
     unsafe impl NSTokenFieldDelegate for Handler {
         #[unsafe(method_id(tokenField:displayStringForRepresentedObject:))]
-        fn token_display(&self, _tf: &NSTokenField, obj: &AnyObject) -> Option<Retained<NSString>> {
-            obj.downcast_ref::<NSString>().map(|s| NSString::from_str(&super::tag_label(&s.to_string())))
+        fn token_display(&self, tf: &NSTokenField, obj: &AnyObject) -> Option<Retained<NSString>> {
+            let folders = app().is_folders_field(tf);
+            obj.downcast_ref::<NSString>().map(|s| {
+                let s = s.to_string();
+                NSString::from_str(&if folders { super::folders::folder_label(&s) } else { super::tag_label(&s) })
+            })
         }
 
         #[unsafe(method_id(tokenField:editingStringForRepresentedObject:))]
@@ -104,13 +108,17 @@ define_class!(
         #[unsafe(method_id(tokenField:completionsForSubstring:indexOfToken:indexOfSelectedItem:))]
         fn token_completions(
             &self,
-            _tf: &NSTokenField,
+            tf: &NSTokenField,
             sub: &NSString,
             _idx: NSInteger,
             _selected: *mut NSInteger,
         ) -> Option<Retained<NSArray<NSString>>> {
-            let names: Vec<Retained<NSString>> =
-                app().tag_matches(&sub.to_string(), 12).into_iter().map(|(t, _)| NSString::from_str(&t)).collect();
+            let a = app();
+            let names: Vec<Retained<NSString>> = if a.is_folders_field(tf) {
+                a.folder_matches(&sub.to_string(), 12).into_iter().map(|p| NSString::from_str(&p)).collect()
+            } else {
+                a.tag_matches(&sub.to_string(), 12).into_iter().map(|(t, _)| NSString::from_str(&t)).collect()
+            };
             Some(NSArray::from_retained_slice(&names))
         }
     }
@@ -192,6 +200,11 @@ define_class!(
         #[unsafe(method(tagsChanged:))]
         fn tags_changed(&self, _s: Option<&AnyObject>) {
             app().save_tags();
+        }
+
+        #[unsafe(method(foldersChanged:))]
+        fn folders_changed(&self, _s: Option<&AnyObject>) {
+            app().save_folders();
         }
 
         #[unsafe(method(rowDoubleClicked:))]
@@ -381,7 +394,7 @@ define_class!(
             let p: NSPoint = self.convertPoint_fromView(ev.locationInWindow(), None);
             let r = super::draw::star_rect(self.bounds());
             let inside = p.x >= r.origin.x && p.x <= r.origin.x + r.size.width && p.y >= r.origin.y && p.y <= r.origin.y + r.size.height;
-            if inside {
+            if inside && !app().in_folders() {
                 app().toggle_star(self.ivars().clip.get());
                 return;
             }

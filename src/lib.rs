@@ -1,5 +1,6 @@
 pub mod appicon;
 pub mod ax;
+pub mod clipy;
 pub mod collective;
 pub mod db;
 pub mod imageio;

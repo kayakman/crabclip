@@ -120,3 +120,20 @@ pub fn like_pattern(s: &str) -> String {
     out.push('%');
     out
 }
+
+/// A search starting with "/" browses the snippet folders: "/" is the top
+/// level, "/Clients/ssh/" a folder, and text after the last "/" filters it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FolderQuery {
+    pub path: String,
+    pub filter: String,
+}
+
+pub fn parse_folder_query(q: &str) -> Option<FolderQuery> {
+    let rest = q.strip_prefix('/')?;
+    let (dir, filter) = match rest.rfind('/') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => ("", rest),
+    };
+    Some(FolderQuery { path: crate::db::folder_parts(dir).join("/"), filter: filter.trim().to_string() })
+}

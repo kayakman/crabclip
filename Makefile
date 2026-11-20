@@ -10,7 +10,7 @@ SIGN_ID   ?= $(or $(shell security find-identity -v -p codesigning 2>/dev/null |
 COLLECTIVE_DIR := $(HOME)/Library/Containers/com.generation-loss.collective/Data/Library/Application Support/Collective
 
 .DEFAULT_GOAL := help
-.PHONY: help build bundle run test install uninstall import-collective unload-collective release logs stats icons clean
+.PHONY: help build bundle run test install uninstall import-collective import-clipy unload-collective release logs stats icons clean
 
 help: ## Show this help
 	@echo "crabclip $(VERSION) — forever clipboard history (menu bar app, ⌘⌥V)"
@@ -58,6 +58,9 @@ uninstall: ## Quit and remove /Applications/crabclip.app (keeps your history db)
 
 import-collective: ## Import Collective.app's saved history (quit Collective first so it saves)
 	target/release/$(APP) --import-collective
+
+import-clipy: ## Import Clipy's history and snippet folders (FILE=snippets.xml for an export)
+	target/release/$(APP) --import-clipy $(FILE)
 
 unload-collective: ## Quit Collective (lets it save) and remove it from login items
 	-osascript -e 'tell application "Collective" to quit'
