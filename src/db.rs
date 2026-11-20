@@ -398,6 +398,24 @@ impl Db {
         }
     }
 
+    /// Insert for importers: content already here only widens its first/last
+    /// seen dates (when `dates`), keeps its metadata where it has some, and
+    /// doesn't count as another copy, so importing again changes nothing.
+    pub fn insert_imported(&self, c: &NewClip, level: i32, dates: bool) -> Result<Inserted> {
+        let existing: Option<i64> =
+            self.conn.query_row("SELECT id FROM clips WHERE hash=?", [&c.hash], |r| r.get(0)).optional()?;
+        let Some(id) = existing else { return self.insert(c, level) };
+        if dates {
+            self.conn.execute(
+                "UPDATE clips SET created_at=MIN(created_at, ?2), copied_at=MAX(copied_at, ?2), \
+                 starred=MAX(starred, ?3), app_bundle=COALESCE(app_bundle, ?4), app_name=COALESCE(app_name, ?5), \
+                 app_path=COALESCE(app_path, ?6) WHERE id=?1",
+                params![id, c.ts, c.starred, c.app.bundle, c.app.name, c.app.path],
+            )?;
+        }
+        Ok(Inserted::Existing(id))
+    }
+
     fn insert_tx(
         &self,
         c: &NewClip,
@@ -768,7 +786,14 @@ impl Db {
         tx.execute("DELETE FROM fts WHERE rowid=?", [id])?;
         tx.execute("DELETE FROM reps WHERE clip_id=?", [id])?;
         tx.execute("DELETE FROM tags WHERE clip_id=?", [id])?;
+        let folders: Vec<i64> = {
+            let mut st = tx.prepare("SELECT folder_id FROM snippets WHERE clip_id=?")?;
+            st.query_map([id], |r| r.get(0))?.collect::<Result<_>>()?
+        };
         tx.execute("DELETE FROM snippets WHERE clip_id=?", [id])?;
+        for f in folders {
+            Self::prune_folder(&tx, f)?;
+        }
         tx.execute("DELETE FROM clips WHERE id=?", [id])?;
         tx.commit()
     }
@@ -799,6 +824,15 @@ impl Db {
             [],
         )?;
         let n = tx.execute(&format!("DELETE FROM clips WHERE {cond}"), [])?;
+        if include_starred {
+            // Folders left with nothing in them, bottom up.
+            while tx.execute(
+                "DELETE FROM folders WHERE id NOT IN (SELECT folder_id FROM snippets) \
+                 AND id NOT IN (SELECT parent FROM folders)",
+                [],
+            )? > 0
+            {}
+        }
         tx.commit()?;
         Ok(n)
     }
@@ -1130,12 +1164,14 @@ impl Db {
             let mut st = tx.prepare("SELECT folder_id FROM snippets WHERE clip_id=?")?;
             st.query_map([clip], |r| r.get(0))?.collect::<Result<_>>()?
         };
+        // Add before removing: moving A/B to A would otherwise prune A (empty
+        // once B goes) before the clip lands in it.
+        for f in want.iter().filter(|f| !have.contains(f)) {
+            Self::add_snippet(&tx, *f, clip, "", None)?;
+        }
         for f in have.iter().filter(|f| !want.contains(f)) {
             tx.execute("DELETE FROM snippets WHERE folder_id=? AND clip_id=?", params![f, clip])?;
             Self::prune_folder(&tx, *f)?;
-        }
-        for f in want.iter().filter(|f| !have.contains(f)) {
-            Self::add_snippet(&tx, *f, clip, "", None)?;
         }
         Self::reindex(&tx, clip)?;
         tx.commit()?;

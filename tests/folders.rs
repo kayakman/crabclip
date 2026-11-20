@@ -59,6 +59,14 @@ fn folders_nest_list_and_prune() {
     assert_eq!(d.folders, vec!["Clients/Formosa"]);
     assert_eq!(d.title.as_deref(), Some("2. Tunnel"));
 
+    // Moving a clip up into the parent of its only folder.
+    let x = insert(&db, 4, "deep one");
+    db.set_folders(x, &["X/Y/Z".into()]).unwrap();
+    assert_eq!(db.set_folders(x, &["X/Y".into()]).unwrap(), vec!["X/Y"]);
+    assert_eq!(db.folder_id("X/Y/Z").unwrap(), None);
+    db.delete(x).unwrap();
+    assert_eq!(db.folder_id("X").unwrap(), None, "deleting a folder's last clip removes the folder");
+
     // Taking the last clip out of a folder removes it, and empty parents too.
     db.set_folders(a, &["Clients/Formosa".into()]).unwrap();
     assert_eq!(db.folder_id("Servers").unwrap(), None);
@@ -71,9 +79,9 @@ fn folders_nest_list_and_prune() {
     db.set_folders(c, &["Keep".into()]).unwrap();
     assert_eq!(db.clear(Some(i64::MAX), false).unwrap(), 2);
     assert_eq!(db.count().unwrap(), 1);
-    db.delete(c).unwrap();
-    let keep = db.folder_id("Keep").unwrap().unwrap();
-    assert!(db.folder_entries(keep, "").unwrap().is_empty());
+    db.make_folder("Empty/Tree").unwrap();
+    db.clear(None, true).unwrap();
+    assert!(db.all_folder_paths().unwrap().is_empty(), "clearing everything leaves no folders");
 }
 
 /// A database laid out like Clipy's (its migrations V1, V3 and V4). Clipy
@@ -139,6 +147,11 @@ fn clipy_db(path: &std::path::Path) {
     hist("h2", 1_700_000_100);
     asset("h2", 0, "public.file-url", b"file:///tmp/a.txt");
     asset("h2", 1, "public.file-url", b"file:///tmp/b.txt");
+    // Converted from old Clipy: files only as a plist of paths.
+    hist("h3", 1_700_000_200);
+    let mut names = Vec::new();
+    plist::Value::Array(vec!["/tmp/my doc.txt".into()]).to_writer_binary(&mut names).unwrap();
+    asset("h3", 0, "NSFilenamesPboardType", &names);
     let folder = |id: &str, title: &str, i: i64| {
         c.execute(r#"INSERT INTO snippetFolders(id, title, "index") VALUES(?, ?, ?)"#, params![id, title, i]).unwrap();
     };
@@ -154,6 +167,7 @@ fn clipy_db(path: &std::path::Path) {
     snippet("f1", "2. VPN Password", "vpn-pass-77", 1);
     snippet("f1", "1. API Key", "api-key-123", 0);
     snippet("f2", "hello", "hello from clipy", 0);
+    snippet("f2", "hello again", "hello from clipy", 1);
 }
 
 #[test]
@@ -167,8 +181,8 @@ fn imports_clipy_database() {
     let db = Db::open_memory().unwrap();
     let s = Settings::default();
     let st = crabclip::clipy::import(&path, &db, &s, |_| {}).unwrap();
-    assert_eq!((st.history, st.added, st.merged, st.skipped), (2, 2, 0, 0));
-    assert_eq!((st.folders, st.snippets), (2, 3));
+    assert_eq!((st.history, st.added, st.merged, st.skipped), (3, 3, 0, 0));
+    assert_eq!((st.folders, st.snippets, st.duplicates), (2, 4, 1));
 
     // History: the text clip with its RTF, the two files as two items.
     let text = search(&db, "hello from clipy");
@@ -177,7 +191,10 @@ fn imports_clipy_database() {
     assert_eq!(d.copied_at, 1_700_000_000_000);
     assert!(d.types.contains("public.rtf"));
     assert_eq!(d.folders, vec!["General"]);
-    let files = search(&db, "type:file");
+    let old = search(&db, "my doc");
+    assert_eq!(old.len(), 1, "old Clipy file clips become files");
+    assert_eq!(db.detail(old[0]).unwrap().unwrap().kind, Kind::File);
+    let files: Vec<i64> = search(&db, "type:file").into_iter().filter(|id| *id != old[0]).collect();
     assert_eq!(files.len(), 1);
     let reps = db.reps(files[0]).unwrap();
     assert_eq!(reps.iter().map(|r| r.item).collect::<Vec<_>>(), vec![0, 1]);
@@ -185,6 +202,8 @@ fn imports_clipy_database() {
 
     // Snippets: Clipy's folders and order, its titles, dated before the history.
     assert_eq!(labels(&db.folder_entries(0, "").unwrap()), vec!["Formosa/ (2)", "General/ (1)"]);
+    let general = db.folder_id("General").unwrap().unwrap();
+    assert_eq!(labels(&db.folder_entries(general, "").unwrap()), vec!["hello again"], "same text: merged, later title");
     let formosa = db.folder_id("Formosa").unwrap().unwrap();
     assert_eq!(labels(&db.folder_entries(formosa, "").unwrap()), vec!["1. API Key", "2. VPN Password"]);
     let key = search(&db, "api-key-123")[0];
@@ -195,9 +214,26 @@ fn imports_clipy_database() {
 
     // Importing again changes nothing.
     let n = db.count().unwrap();
+    let before: Vec<(i64, i64, i64)> = db
+        .conn
+        .prepare("SELECT created_at, copied_at, copy_count FROM clips ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     let st = crabclip::clipy::import(&path, &db, &s, |_| {}).unwrap();
-    assert_eq!((st.added, st.merged), (0, 2));
+    assert_eq!((st.added, st.merged), (0, 3));
     assert_eq!(db.count().unwrap(), n);
+    let after: Vec<(i64, i64, i64)> = db
+        .conn
+        .prepare("SELECT created_at, copied_at, copy_count FROM clips ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(before, after, "dates and copy counts don't move on a re-import");
     assert_eq!(labels(&db.folder_entries(formosa, "").unwrap()), vec!["1. API Key", "2. VPN Password"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

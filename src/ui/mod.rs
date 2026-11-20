@@ -105,6 +105,8 @@ pub struct App {
     app_filter: RefCell<Option<String>>,
     hotkey: RefCell<Option<(GlobalHotKeyManager, Vec<HotKey>)>>,
     folder_hotkey_id: Cell<u32>,
+    /// Why the folder shortcut couldn't be registered, if it couldn't.
+    pub folder_hotkey_err: RefCell<Option<String>>,
     /// Folder mode (the search starts with "/"): the folder listed (-1: none
     /// at that path) and what each row is.
     folder: Cell<Option<i64>>,
@@ -203,6 +205,7 @@ fn start(handler: &Handler) {
         app_filter: RefCell::new(None),
         hotkey: RefCell::new(None),
         folder_hotkey_id: Cell::new(0),
+        folder_hotkey_err: RefCell::new(None),
         folder: Cell::new(None),
         entries: RefCell::new(HashMap::new()),
         select_after: Cell::new(None),
@@ -278,7 +281,7 @@ fn start(handler: &Handler) {
         let _ = a.db.set_setting("ax_prompted", "1");
         crate::ax::prompt();
     }
-    if a.db.get_setting("clipy_asked").is_none() && crate::clipy::default_db().is_some() {
+    if a.db.get_setting("clipy_asked").is_none() && crate::clipy::default_db(false).is_some() {
         DispatchQueue::main().exec_async(prefs::offer_clipy);
     }
     let _ = a.jobs.send(Job::Prune);
@@ -294,6 +297,7 @@ impl App {
     /// Debug aid: render the panel offscreen to a PNG (never shown, never key).
     /// CRABCLIP_SNAPSHOT_QUERY / _ROW pick what is displayed.
     fn snapshot(&self, out: &str) {
+        crate::settings::read_only();
         let ui = self.ui();
         // CRABCLIP_SNAPSHOT_APPEARANCE=dark|light instead of the system's.
         if let Ok(look) = std::env::var("CRABCLIP_SNAPSHOT_APPEARANCE") {
@@ -320,8 +324,9 @@ impl App {
             // Shows the undo pill; the process exits before the delete is final.
             // Never for a starred clip: its confirmation alert would take focus.
             let starred = self.selected_id().and_then(|id| self.db.row(id).ok().flatten()).is_some_and(|r| r.starred);
-            if starred {
-                log!("snapshot: selected clip is starred, not deleting");
+            let filed = self.selected_id().is_some_and(|id| !self.db.folders_of(id).unwrap_or_default().is_empty());
+            if starred || filed {
+                log!("snapshot: selected clip is starred or filed, not deleting");
             } else {
                 self.delete_selected();
             }
@@ -379,11 +384,15 @@ impl App {
         let fhk: Option<HotKey> = if fspec.is_empty() {
             None
         } else {
-            Some(fspec.parse().map_err(|e| format!("bad shortcut {fspec:?}: {e}"))?)
+            match fspec.parse() {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    log!("hotkey: bad folders shortcut {fspec:?}: {e}");
+                    None
+                }
+            }
         };
-        if fhk.is_some_and(|f| f.id() == hk.id()) {
-            return Err("The history and the folders need different shortcuts.".into());
-        }
+        let fhk = fhk.filter(|f| f.id() != hk.id());
         let mut slot = self.hotkey.borrow_mut();
         if slot.is_none() {
             let m = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
@@ -402,10 +411,20 @@ impl App {
         self.folder_hotkey_id.set(0);
         m.register(hk).map_err(|e| format!("cannot register {spec}: {e}"))?;
         current.push(hk);
+        // A folder shortcut that can't be had (another app holds it) doesn't
+        // take the history's down with it.
+        *self.folder_hotkey_err.borrow_mut() = None;
         if let Some(f) = fhk {
-            m.register(f).map_err(|e| format!("cannot register {fspec}: {e}"))?;
-            current.push(f);
-            self.folder_hotkey_id.set(f.id());
+            match m.register(f) {
+                Ok(()) => {
+                    current.push(f);
+                    self.folder_hotkey_id.set(f.id());
+                }
+                Err(e) => {
+                    log!("hotkey: folders {fspec}: {e}");
+                    *self.folder_hotkey_err.borrow_mut() = Some(format!("cannot register {fspec}: {e}"));
+                }
+            }
         }
         log!("hotkey: {spec}{}", if fspec.is_empty() { String::new() } else { format!(", folders: {fspec}") });
         if let Some(btn) = self.ui.get().and_then(|ui| ui.status_item.button(self.mtm)) {
@@ -674,10 +693,7 @@ impl App {
         let n = ids.len();
         *self.ids.borrow_mut() = ids;
         self.dirty.set(false);
-        let row_h = if self.in_folders() { self.folder_row_height() } else { self.settings.borrow().row_height };
-        if ui.table.rowHeight() != row_h {
-            ui.table.setRowHeight(row_h);
-        }
+        self.apply_row_height();
         ui.table.reloadData();
         if n > 0 {
             self.select_row(row as isize);
@@ -686,6 +702,15 @@ impl App {
         self.update_count();
         if t0.elapsed().as_millis() > 50 {
             log!("search {q:?}: {n} rows in {:?}", t0.elapsed());
+        }
+    }
+
+    /// Compact rows while browsing folders, the chosen row size otherwise.
+    pub fn apply_row_height(&self) {
+        let h = if self.in_folders() { self.folder_row_height() } else { self.settings.borrow().row_height };
+        let t = &self.ui().table;
+        if t.rowHeight() != h {
+            t.setRowHeight(h);
         }
     }
 
@@ -1309,7 +1334,7 @@ impl App {
         } else {
             "Pin window open (⌘P)"
         })));
-        ui.table.setRowHeight(self.settings.borrow().row_height);
+        self.apply_row_height();
     }
 
     /// Deleting hides the clip at once; it is really deleted after a few
@@ -1318,7 +1343,18 @@ impl App {
         let Some(id) = self.selected_id() else { return };
         let row = self.ui().table.selectedRow();
         let starred = self.db.row(id).ok().flatten().is_some_and(|r| r.starred);
+        let folders = self.db.folders_of(id).unwrap_or_default();
         if starred && !self.confirm("Delete this starred clip?", "It will be removed from the history for good.", "Delete") {
+            return;
+        }
+        if !starred
+            && !folders.is_empty()
+            && !self.confirm(
+                "Delete this snippet?",
+                &format!("It will be removed from the history and from {} for good.", folders.join(", ")),
+                "Delete",
+            )
+        {
             return;
         }
         self.finish_delete(); // only one undoable delete at a time
@@ -1381,7 +1417,9 @@ impl App {
     /// Typing in a text field (⌘Z there undoes typing).
     fn editing_text(&self) -> bool {
         let ui = self.ui();
-        ui.search.currentEditor().is_some() || ui.tags_field.currentEditor().is_some()
+        ui.search.currentEditor().is_some()
+            || ui.tags_field.currentEditor().is_some()
+            || ui.folders_field.currentEditor().is_some()
     }
 
     pub fn app_filter_changed(&self) {

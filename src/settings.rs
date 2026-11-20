@@ -1,6 +1,15 @@
 //! User preferences, stored as key/value rows in the database.
 
 use crate::db::Db;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// From now on `save` does nothing (offscreen snapshots must not change
+/// the preferences of the database they look at).
+pub fn read_only() {
+    READ_ONLY.store(true, Ordering::Relaxed);
+}
 
 /// Interface size stops in percent (slider, ⌘+ / ⌘-): fine steps below 100%.
 pub const UI_SCALES: &[f64] = &[70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0, 110.0, 125.0];
@@ -113,6 +122,9 @@ impl Settings {
     }
 
     pub fn save(&self, db: &Db) {
+        if READ_ONLY.load(Ordering::Relaxed) {
+            return;
+        }
         let pairs = [
             ("hotkey", self.hotkey.clone()),
             ("folder_hotkey", self.folder_hotkey.clone()),

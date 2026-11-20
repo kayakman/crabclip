@@ -60,7 +60,7 @@ fn main() {
         Some("--import-clipy") => {
             let db = Db::open(&Db::default_path()).expect("open db");
             let settings = Settings::load(&db);
-            let Some(path) = args.get(1).map(std::path::PathBuf::from).or_else(crabclip::clipy::default_db) else {
+            let Some(path) = args.get(1).map(std::path::PathBuf::from).or_else(|| crabclip::clipy::default_db(true)) else {
                 println!("No Clipy database found. Open the current Clipy once (it converts older data), or pass a snippets XML export.");
                 std::process::exit(1);
             };

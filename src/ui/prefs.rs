@@ -241,7 +241,7 @@ pub fn show() {
     let zstd = f.popup("Compression:", &ZSTD.iter().map(|(_, t)| *t).collect::<Vec<_>>(), zstd_idx);
     let keep_idx = KEEP.iter().position(|(v, _)| *v == s.keep_days).unwrap_or(0);
     let keep = f.popup("Keep history:", &KEEP.iter().map(|(_, t)| *t).collect::<Vec<_>>(), keep_idx);
-    f.note("Starred clips are always kept.");
+    f.note("Starred clips and clips in folders are always kept.");
 
     f.label("Ignore apps (bundle ids):");
     let ignore = f.field(220.0, 330.0, &s.ignore_apps.join(", "));
@@ -407,12 +407,16 @@ pub fn changed(_sender: Option<&AnyObject>) {
         let n: i64 = a
             .db
             .conn
-            .query_row("SELECT COUNT(*) FROM clips WHERE starred=0 AND copied_at < ?", [before], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM clips WHERE starred=0 AND copied_at < ? AND id NOT IN (SELECT clip_id FROM snippets)",
+                [before],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         if n > 0
             && !a.confirm(
                 &format!("Delete {n} clips older than {} days?", new.keep_days),
-                "Unstarred clips older than that are removed now and from then on. Starred clips are kept.",
+                "Clips older than that are removed now and from then on. Starred clips and clips in folders are kept.",
                 "Delete",
             )
         {
@@ -444,6 +448,7 @@ pub fn changed(_sender: Option<&AnyObject>) {
         a.ui().table.reloadData();
     }
     if old.font_size != new.font_size {
+        a.apply_row_height();
         a.ui().table.reloadData();
         a.update_preview();
     }
@@ -482,8 +487,27 @@ pub fn action(sender: Option<&AnyObject>) {
             let spec = PREFS.with(|p| p.borrow().as_ref().map(|p| p.folder_hotkey.stringValue().to_string()));
             let Some(spec) = spec else { return };
             let old = a.settings.borrow().folder_hotkey.clone();
-            a.settings.borrow_mut().folder_hotkey = spec.trim().to_string();
-            match a.register_hotkey() {
+            let spec = spec.trim().to_string();
+            let same = spec.parse::<global_hotkey::hotkey::HotKey>().ok().map(|h| h.id())
+                == a.settings.borrow().hotkey.parse::<global_hotkey::hotkey::HotKey>().ok().map(|h| h.id());
+            let bad = if spec.is_empty() {
+                None
+            } else if same {
+                Some("The history and the folders need different shortcuts.".to_string())
+            } else if let Err(e) = spec.parse::<global_hotkey::hotkey::HotKey>() {
+                Some(format!("bad shortcut {spec:?}: {e}"))
+            } else {
+                None
+            };
+            a.settings.borrow_mut().folder_hotkey = spec;
+            let res = match bad {
+                Some(e) => Err(e),
+                None => a.register_hotkey().and_then(|()| match a.folder_hotkey_err.borrow().clone() {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                }),
+            };
+            match res {
                 Ok(()) => a.settings.borrow().save(&a.db),
                 Err(e) => {
                     a.settings.borrow_mut().folder_hotkey = old.clone();
@@ -557,7 +581,7 @@ const CLIPY_TEXT: &str = "Its history (every format of each clip) and its snippe
 /// Preferences › Import from Clipy: its database, or a file picked by hand.
 fn import_clipy() {
     let a = app();
-    let path = match crate::clipy::default_db() {
+    let path = match crate::clipy::default_db(true) {
         Some(p) => p,
         None => {
             let msg = if crate::clipy::legacy_realm().is_some() {
@@ -591,7 +615,7 @@ fn import_clipy() {
 /// Asked once, at a launch that finds Clipy's database.
 pub fn offer_clipy() {
     let a = app();
-    let Some(path) = crate::clipy::default_db() else { return };
+    let Some(path) = crate::clipy::default_db(false) else { return };
     let _ = a.db.set_setting("clipy_asked", "1");
     if a.confirm("Bring in your Clipy history and snippets?", CLIPY_TEXT, "Import") {
         run_import(vec!["--import-clipy".into(), path.display().to_string()], "Clipy import finished");

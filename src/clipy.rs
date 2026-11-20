@@ -22,9 +22,13 @@ fn support_dirs() -> Vec<PathBuf> {
     ]
 }
 
-/// Clipy's database, if it has one on this Mac.
-pub fn default_db() -> Option<PathBuf> {
-    support_dirs().into_iter().map(|d| d.join("sqlite.db")).find(|p| p.exists())
+/// Clipy's database, if it has one on this Mac. `container` also looks in
+/// its sandbox container, which macOS may guard with an "access data from
+/// other apps" prompt: only when the user asked for an import.
+pub fn default_db(container: bool) -> Option<PathBuf> {
+    let dirs = support_dirs();
+    let n = if container { dirs.len() } else { 1 };
+    dirs.into_iter().take(n).map(|d| d.join("sqlite.db")).find(|p| p.exists())
 }
 
 /// Data of an old Clipy (Realm) that was never opened by a current version.
@@ -40,25 +44,35 @@ pub struct Stats {
     pub skipped: usize,
     pub folders: usize,
     pub snippets: usize,
+    /// Snippets with the same text as another in the same folder (one clip,
+    /// filed once: the later title wins).
+    pub duplicates: usize,
 }
 
 impl Stats {
     pub fn summary(&self) -> String {
-        format!(
+        let mut s = format!(
             "{} history clips ({} added, {} already there, {} skipped), {} snippets in {} folders",
             self.history, self.added, self.merged, self.skipped, self.snippets, self.folders
-        )
+        );
+        if self.duplicates > 0 {
+            s += &format!(" ({} with the same text as another in their folder were merged)", self.duplicates);
+        }
+        s
     }
 }
 
 /// Import a Clipy database or snippets XML export into `db`.
 pub fn import(path: &Path, db: &Db, settings: &Settings, progress: impl FnMut(&Stats)) -> Result<Stats, String> {
     crate::log!("clipy: importing {}", path.display());
-    let head = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let st = if head.starts_with(b"SQLite format 3\0") {
+    let mut head = [0u8; 16];
+    let n = std::io::Read::read(&mut std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?, &mut head)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let st = if head[..n] == *b"SQLite format 3\0" {
         import_sqlite(path, db, settings, progress)?
     } else {
-        import_xml(&String::from_utf8_lossy(&head), db, settings)?
+        let xml = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        import_xml(&String::from_utf8_lossy(&xml), db, settings)?
     };
     crate::log!("clipy: {} -> {:?}", path.display(), st);
     Ok(st)
@@ -119,8 +133,8 @@ fn import_sqlite(path: &Path, db: &Db, settings: &Settings, mut progress: impl F
                     rep
                 })
                 .collect();
-            let cap = Capture { ts: to_ms(when), reps, ..Default::default() };
-            match ingest::build(cap, settings).map(|c| db.insert(&c, settings.zstd_level)) {
+            let cap = Capture { ts: to_ms(when), reps: file_urls(reps), ..Default::default() };
+            match ingest::build(cap, settings).map(|c| db.insert_imported(&c, settings.zstd_level, true)) {
                 Some(Ok(Inserted::New(_))) => st.added += 1,
                 Some(Ok(Inserted::Existing(_))) => st.merged += 1,
                 Some(Err(err)) => {
@@ -183,7 +197,10 @@ fn import_xml(xml: &str, db: &Db, settings: &Settings) -> Result<Stats, String> 
 /// crowd the top of the history (a snippet already in it keeps its date).
 fn add_snippets(folders: Vec<Folder>, db: &Db, settings: &Settings, st: &mut Stats) -> Result<(), String> {
     let e = |e: rusqlite::Error| e.to_string();
-    let oldest: Option<i64> = db.conn.query_row("SELECT MIN(created_at) FROM clips", [], |r| r.get(0)).map_err(e)?;
+    let oldest: Option<i64> = db
+        .conn
+        .query_row("SELECT MIN(created_at) FROM clips WHERE id NOT IN (SELECT clip_id FROM snippets)", [], |r| r.get(0))
+        .map_err(e)?;
     let ts = oldest.unwrap_or_else(crate::timefmt::now_ms) - 60_000;
     let app = AppInfo {
         bundle: Some(BUNDLE.into()),
@@ -194,6 +211,7 @@ fn add_snippets(folders: Vec<Folder>, db: &Db, settings: &Settings, st: &mut Sta
         let icon = app.path.as_deref().and_then(crate::appicon::png_for_path);
         let _ = db.save_app(BUNDLE, app.name.as_deref(), app.path.as_deref(), icon.as_deref());
     }
+    let mut filed = std::collections::HashSet::new();
     for f in folders {
         let name = f.title.replace('/', "∕");
         let name = if name.trim().is_empty() { "Untitled".to_string() } else { name };
@@ -207,12 +225,51 @@ fn add_snippets(folders: Vec<Folder>, db: &Db, settings: &Settings, st: &mut Sta
                 st.skipped += 1;
                 continue;
             };
-            let id = db.insert(&clip, settings.zstd_level).map_err(e)?.id();
+            // A snippet already in the history keeps its dates.
+            let id = db.insert_imported(&clip, settings.zstd_level, false).map_err(e)?.id();
+            if !filed.insert((fid, id)) {
+                crate::log!("clipy: {name:?}: {:?} has the same text as an earlier snippet; merged", title.trim());
+                st.duplicates += 1;
+            }
             db.file_snippet(fid, id, title.trim(), Some(index)).map_err(e)?;
             st.snippets += 1;
         }
     }
     Ok(())
+}
+
+/// Old Clipy kept files only as NSFilenamesPboardType (a plist of paths):
+/// turn that into file URLs, one per item, like a copy from Finder today.
+fn file_urls(reps: Vec<Rep>) -> Vec<Rep> {
+    if reps.iter().any(|r| r.uti == "public.file-url") {
+        return reps;
+    }
+    let Some(names) = reps.iter().find(|r| r.uti == "NSFilenamesPboardType") else { return reps };
+    let paths: Vec<String> = plist::Value::from_reader(std::io::Cursor::new(&names.data))
+        .ok()
+        .and_then(|v| v.into_array())
+        .map(|a| a.into_iter().filter_map(|p| p.into_string()).collect())
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return reps;
+    }
+    let mut out: Vec<Rep> = reps.into_iter().filter(|r| r.uti != "NSFilenamesPboardType").collect();
+    for (i, p) in paths.iter().enumerate() {
+        let url = format!("file://{}", percent_encode(p));
+        out.push(Rep { item: i as i64, uti: "public.file-url".into(), data: url.into_bytes() });
+    }
+    out
+}
+
+fn percent_encode(path: &str) -> String {
+    let mut s = String::new();
+    for b in path.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => s.push(b as char),
+            _ => s += &format!("%{b:02X}"),
+        }
+    }
+    s
 }
 
 /// Clipy stores unix seconds; take milliseconds too, should a version use them.
