@@ -86,7 +86,10 @@ its settings shortcut the preferences, and each folder shortcut opens that
 folder (matched by Clipy's folder id, so not from an `.xml` export). Clipy's
 clear history and edit snippets shortcuts have no counterpart and are left out
 (the log says which). If Clipy is still running crabclip offers to quit it, so
-the two don't both answer the same keys; take it out of your login items too.
+the two don't both answer the same keys; take it out of your login items too. Shortcut keys are
+places on the keyboard (a US layout's, as global-hotkey names them), while Clipy
+remembers the character: on a layout that moves letters (AZERTY, QWERTZ,
+Dvorak) check the imported ones in Preferences.
 
 Search: words match anywhere (text, OCR text, app, window title, path, URL;
 case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,

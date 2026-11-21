@@ -40,6 +40,8 @@ use std::time::Instant;
 
 pub const SHOW_NOTIFICATION: &str = "com.rod.crabclip.show";
 pub const QUIT_NOTIFICATION: &str = "com.rod.crabclip.quit";
+/// Shortcut settings were changed by another process (`--import-clipy`).
+pub const SHORTCUTS_NOTIFICATION: &str = "com.rod.crabclip.shortcuts";
 pub const AGENT_LABEL: &str = "com.rod.crabclip.agent";
 pub const PANEL_AUTOSAVE: &str = "crabclip.panel";
 const CACHE_ROWS: usize = 160;
@@ -261,6 +263,12 @@ fn start(handler: &Handler) {
             Some(&NSString::from_str(QUIT_NOTIFICATION)),
             None,
         );
+        center.addObserver_selector_name_object(
+            &a.handler,
+            sel!(shortcutsFromNotification:),
+            Some(&NSString::from_str(SHORTCUTS_NOTIFICATION)),
+            None,
+        );
     }
 
     let installed = NSBundle::mainBundle().bundlePath().to_string().starts_with("/Applications/");
@@ -449,7 +457,7 @@ impl App {
             Action::Folders => self.show_folders(),
             Action::Folder(path) if up && self.folder.get() == self.db.nearest_folder(&path).ok() => self.hide(),
             Action::Folder(path) => self.show_folder(&path),
-            Action::Prefs => prefs::show(),
+            Action::Prefs => prefs::toggle(),
         }
     }
 
@@ -1976,7 +1984,7 @@ pub fn running_as_agent() -> bool {
     std::env::var("XPC_SERVICE_NAME").is_ok_and(|v| v == AGENT_LABEL)
 }
 
-fn post_distributed(name: &str) {
+pub fn post_distributed(name: &str) {
     unsafe {
         NSDistributedNotificationCenter::defaultCenter().postNotificationName_object_userInfo_deliverImmediately(
             &NSString::from_str(name),

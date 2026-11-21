@@ -28,13 +28,16 @@ impl Action {
 }
 
 /// The shortcuts in a list ("cmd+alt+v, ctrl+shift+cmd+v"), trimmed. A comma
-/// right after a "+" is the comma key ("cmd+,"), not a separator.
+/// right after a "+" is the comma key ("cmd+,"), not a separator; stray
+/// commas are dropped.
 pub fn split(list: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for ch in list.chars() {
         let t = cur.trim();
-        if ch == ',' && !t.is_empty() && !t.ends_with('+') {
+        if ch == ',' && t.is_empty() {
+            continue;
+        } else if ch == ',' && !t.ends_with('+') {
             out.push(t.to_string());
             cur.clear();
         } else {
@@ -123,6 +126,17 @@ fn key_label(k: &str) -> String {
         "arrowdown" | "down" => "↓".into(),
         "arrowleft" | "left" => "←".into(),
         "arrowright" | "right" => "→".into(),
+        "comma" => ",".into(),
+        "period" => ".".into(),
+        "slash" => "/".into(),
+        "backslash" => "\\".into(),
+        "semicolon" => ";".into(),
+        "quote" => "'".into(),
+        "backquote" => "`".into(),
+        "minus" => "-".into(),
+        "equal" => "=".into(),
+        "bracketleft" => "[".into(),
+        "bracketright" => "]".into(),
         _ if k.chars().count() == 1 => k.to_uppercase(),
         _ => {
             let mut c = k.chars();

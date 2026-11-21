@@ -164,6 +164,8 @@ fn clipy_db(path: &std::path::Path) {
     };
     folder("f2", "General", 1);
     folder("f1", "Formosa", 0);
+    folder("f3", " My  Work ", 2);
+    snippet("f3", "todo", "todo list", 0);
     snippet("f1", "2. VPN Password", "vpn-pass-77", 1);
     snippet("f1", "1. API Key", "api-key-123", 0);
     snippet("f2", "hello", "hello from clipy", 0);
@@ -182,7 +184,7 @@ fn imports_clipy_database() {
     let s = Settings::default();
     let st = crabclip::clipy::import(&path, None, &db, &s, |_| {}).unwrap();
     assert_eq!((st.history, st.added, st.merged, st.skipped), (3, 3, 0, 0));
-    assert_eq!((st.folders, st.snippets, st.duplicates), (2, 4, 1));
+    assert_eq!((st.folders, st.snippets, st.duplicates), (3, 5, 1));
 
     // History: the text clip with its RTF, the two files as two items.
     let text = search(&db, "hello from clipy");
@@ -201,7 +203,7 @@ fn imports_clipy_database() {
     assert_eq!(db.detail(files[0]).unwrap().unwrap().kind, Kind::File);
 
     // Snippets: Clipy's folders and order, its titles, dated before the history.
-    assert_eq!(labels(&db.folder_entries(0, "").unwrap()), vec!["Formosa/ (2)", "General/ (1)"]);
+    assert_eq!(labels(&db.folder_entries(0, "").unwrap()), vec!["Formosa/ (2)", "General/ (1)", "My Work/ (1)"]);
     let general = db.folder_id("General").unwrap().unwrap();
     assert_eq!(labels(&db.folder_entries(general, "").unwrap()), vec!["hello again"], "same text: merged, later title");
     let formosa = db.folder_id("Formosa").unwrap().unwrap();
@@ -297,13 +299,21 @@ fn clipy_key_combos() {
     assert!(combo(r#"{"key":"a","modifiers":256,"doubledModifiers":true}"#).is_err(), "double-tapped modifier");
     assert!(combo(r#"{"key":"nope","modifiers":256,"doubledModifiers":false}"#).is_err());
 
-    // Every Clipy key is one global-hotkey knows, each its own key.
-    let mut ids = std::collections::HashSet::new();
+    // Every Clipy key is one global-hotkey knows, in its own place: keys
+    // with the same code (Japanese layouts' @ ^ : sit on ANSI's [ = ') are
+    // the same key.
+    let mut by_code = std::collections::HashMap::new();
     for (name, code, _) in crabclip::clipy::KEYS {
         let spec = combo(&format!(r#"{{"key":"{name}","modifiers":256,"doubledModifiers":false}}"#)).unwrap();
         let hk = crabclip::hotkeys::parse(&spec).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert!(ids.insert(hk.id()), "{name} maps to the same key as another");
-        assert_eq!(combo(&format!(r#"{{"keyCode":{code},"modifiers":256,"doubledModifiers":false}}"#)).unwrap(), spec);
+        let first = *by_code.entry(*code).or_insert(hk.id());
+        assert_eq!(first, hk.id(), "{name}: same code, same key");
+        assert_eq!(by_code.values().filter(|i| **i == hk.id()).count(), 1, "{name} maps to another code's key");
+        let by_number = combo(&format!(r#"{{"keyCode":{code},"modifiers":256,"doubledModifiers":false}}"#)).unwrap();
+        assert_eq!(crabclip::hotkeys::parse(&by_number).unwrap().id(), hk.id());
+    }
+    for name in ["atSign", "caret", "colon"] {
+        assert!(combo(&format!(r#"{{"key":"{name}","modifiers":256,"doubledModifiers":false}}"#)).is_ok(), "{name}");
     }
 }
 
@@ -322,7 +332,8 @@ fn clipy_prefs() -> plist::Dictionary {
     // Folder ids are upper case here and lower case in its database.
     data(
         "folderKeyCombos",
-        r#"{"F1":{"key":"f","doubledModifiers":false,"modifiers":6912},"GONE":{"key":"g","doubledModifiers":false,"modifiers":6912}}"#,
+        r#"{"F1":{"key":"f","doubledModifiers":false,"modifiers":6912},"GONE":{"key":"g","doubledModifiers":false,"modifiers":6912},
+            "F3":{"key":"w","doubledModifiers":false,"modifiers":6912}}"#,
     );
     d.insert("kCPYPrefShowStatusItemKey".into(), plist::Value::Integer(1.into()));
     d
@@ -341,7 +352,7 @@ fn imports_clipy_shortcuts() {
     assert_eq!(sc.history, vec!["alt+shift+cmd+v", "ctrl+shift+cmd+v"]);
     assert_eq!(sc.snippets, vec!["shift+cmd+b"]);
     assert_eq!(sc.settings, vec!["ctrl+alt+shift+cmd+v"]);
-    assert_eq!(sc.folders.len(), 2);
+    assert_eq!(sc.folders.len(), 3);
     assert_eq!(sc.skipped.len(), 1, "edit snippets has no equivalent: {:?}", sc.skipped);
     assert!(crabclip::clipy::read_shortcuts(&plist::Dictionary::new()).is_empty());
 
@@ -356,8 +367,8 @@ fn imports_clipy_shortcuts() {
     };
     mine.save(&db);
     let st = crabclip::clipy::import(&path, Some(&clipy_prefs()), &db, &Settings::default(), |_| {}).unwrap();
-    assert_eq!((st.shortcuts, st.shortcuts_skipped), (5, 2), "edit snippets and the folder not in Clipy's database");
-    assert!(st.summary().contains("5 shortcuts"), "{}", st.summary());
+    assert_eq!((st.shortcuts, st.shortcuts_skipped), (6, 2), "edit snippets and the folder not in Clipy's database");
+    assert!(st.summary().contains("6 shortcuts"), "{}", st.summary());
     let s = Settings::load(&db);
     assert_eq!(s.hotkey, "alt+shift+cmd+v, ctrl+shift+cmd+v", "Clipy's replace ⌘⌥V");
     assert_eq!(s.folder_hotkey, "shift+cmd+b");
@@ -367,7 +378,9 @@ fn imports_clipy_shortcuts() {
         vec![
             FolderShortcut { folder: "Elsewhere".into(), hotkey: "cmd+alt+9".into() },
             FolderShortcut { folder: "Formosa".into(), hotkey: "ctrl+alt+shift+cmd+f".into() },
-        ]
+            FolderShortcut { folder: "My Work".into(), hotkey: "ctrl+alt+shift+cmd+w".into() },
+        ],
+        "folder paths as stored: \" My  Work \" is My Work"
     );
     assert_eq!(crabclip::hotkeys::check(&s), Ok(()));
     assert_eq!(db.nearest_folder("Formosa").unwrap(), db.folder_id("Formosa").unwrap().unwrap());
@@ -381,10 +394,22 @@ fn imports_clipy_shortcuts() {
     std::fs::write(&xml, "<folders><folder><title>Formosa</title><snippets/></folder></folders>").unwrap();
     let db = Db::open_memory().unwrap();
     let st = crabclip::clipy::import(&xml, Some(&clipy_prefs()), &db, &Settings::default(), |_| {}).unwrap();
-    assert_eq!((st.shortcuts, st.shortcuts_skipped), (4, 3));
+    assert_eq!((st.shortcuts, st.shortcuts_skipped), (4, 4));
     let s = Settings::load(&db);
     assert_eq!(s.prefs_hotkey, "ctrl+alt+shift+cmd+v");
     assert!(s.folder_shortcuts.is_empty());
+
+    // Clipy without a history shortcut: crabclip's stays, and a Clipy one on
+    // the same keys is left out rather than taking it.
+    let db = Db::open_memory().unwrap();
+    let mut p = plist::Dictionary::new();
+    p.insert("snippetKeyCombo".into(), plist::Value::Data(br#"{"key":"v","modifiers":2304,"doubledModifiers":false}"#.to_vec()));
+    p.insert("settingsKeyCombo".into(), plist::Value::Data(br#"{"key":"p","modifiers":2304,"doubledModifiers":false}"#.to_vec()));
+    let st = crabclip::clipy::import(&xml, Some(&p), &db, &Settings::default(), |_| {}).unwrap();
+    assert_eq!((st.shortcuts, st.shortcuts_skipped), (1, 1));
+    let s = Settings::load(&db);
+    assert_eq!((s.hotkey.as_str(), s.folder_hotkey.as_str(), s.prefs_hotkey.as_str()), ("cmd+alt+v", "", "alt+cmd+p"));
+    assert_eq!(crabclip::hotkeys::check(&s), Ok(()));
 
     // No preferences, or none of them shortcuts: settings untouched.
     let db = Db::open_memory().unwrap();

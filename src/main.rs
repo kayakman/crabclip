@@ -74,7 +74,13 @@ fn main() {
             });
             let _ = db.vacuum_some();
             match r {
-                Ok(st) => println!("{}", st.summary()),
+                Ok(st) => {
+                    if st.shortcuts > 0 {
+                        // A running crabclip takes them now (and won't save its old ones over them).
+                        crabclip::ui::post_distributed(crabclip::ui::SHORTCUTS_NOTIFICATION);
+                    }
+                    println!("{}", st.summary())
+                }
                 Err(e) => {
                     println!("{}: {e}", path.display());
                     std::process::exit(1);

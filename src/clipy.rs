@@ -182,7 +182,8 @@ fn import_sqlite(
         let mut q = src.prepare(r#"SELECT title, content, "index" FROM snippets WHERE folderID=? ORDER BY "index""#).map_err(e)?;
         let mut all = Vec::new();
         for (id, title, index) in folders {
-            ids.insert(id.to_lowercase(), folder_name(&title));
+            // As the folder will be stored ("A  B" is "A B").
+            ids.insert(id.to_lowercase(), crate::db::folder_parts(&folder_name(&title)).join("/"));
             let snippets = q
                 .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .map_err(e)?
@@ -283,18 +284,26 @@ fn import_shortcuts(sc: &Shortcuts, ids: &HashMap<String, String>, db: &Db, st: 
     if sc.is_empty() {
         return;
     }
+    let id = |k: &String| crate::hotkeys::parse(k).ok().map(|h| h.id());
     let mut s = Settings::load(db);
-    let mut taken: Vec<u32> = Vec::new();
+    // Without a history shortcut from Clipy, crabclip's own stays: a Clipy
+    // one on the same keys is left out.
+    let reserved: Vec<u32> =
+        if sc.history.is_empty() { crate::hotkeys::split(&s.hotkey).iter().filter_map(id).collect() } else { Vec::new() };
+    let mut imported: Vec<u32> = Vec::new();
     let mut keep = |list: &[String], st: &mut Stats| -> Vec<String> {
         let mut out = Vec::new();
         for spec in list {
             match crate::hotkeys::parse(spec) {
-                Ok(h) if !taken.contains(&h.id()) => {
-                    taken.push(h.id());
+                Ok(h) if !imported.contains(&h.id()) && !reserved.contains(&h.id()) => {
+                    imported.push(h.id());
                     out.push(spec.clone());
                     st.shortcuts += 1;
                 }
-                Ok(_) => crate::log!("clipy: {spec} is used twice in Clipy; kept the first"),
+                Ok(_) => {
+                    crate::log!("clipy: {spec} is taken by another shortcut; left out");
+                    st.shortcuts_skipped += 1;
+                }
                 Err(e) => {
                     crate::log!("clipy: {e}");
                     st.shortcuts_skipped += 1;
@@ -307,38 +316,39 @@ fn import_shortcuts(sc: &Shortcuts, ids: &HashMap<String, String>, db: &Db, st: 
     let snippets = keep(&sc.snippets, st);
     let settings = keep(&sc.settings, st);
     let mut folders = Vec::new();
-    for (id, spec) in &sc.folders {
-        match ids.get(id) {
+    for (folder_id, spec) in &sc.folders {
+        match ids.get(folder_id) {
             Some(path) => {
                 for spec in keep(std::slice::from_ref(spec), st) {
                     folders.push(crate::settings::FolderShortcut { folder: path.clone(), hotkey: spec });
                 }
             }
             None => {
-                crate::log!("clipy: shortcut {spec} is for a folder not in this import ({id})");
+                crate::log!("clipy: shortcut {spec} is for a folder not in this import ({folder_id})");
                 st.shortcuts_skipped += 1;
             }
         }
     }
+    // crabclip's shortcuts on keys Clipy's took are dropped.
     let free = |list: &str| -> String {
         let specs = crate::hotkeys::split(list);
-        crate::hotkeys::join(
-            &specs.into_iter().filter(|k| crate::hotkeys::parse(k).map_or(true, |h| !taken.contains(&h.id()))).collect::<Vec<_>>(),
-        )
+        crate::hotkeys::join(&specs.into_iter().filter(|k| id(k).is_none_or(|i| !imported.contains(&i))).collect::<Vec<_>>())
     };
     let replace = |mine: &str, clipy: &[String]| if clipy.is_empty() { free(mine) } else { crate::hotkeys::join(clipy) };
     s.hotkey = replace(&s.hotkey, &history);
     s.folder_hotkey = replace(&s.folder_hotkey, &snippets);
     s.prefs_hotkey = replace(&s.prefs_hotkey, &settings);
-    for f in &mut s.folder_shortcuts {
-        f.hotkey = free(&f.hotkey);
-    }
-    // A folder with a shortcut from Clipy takes it instead of the one it had.
-    s.folder_shortcuts.retain(|f| !f.hotkey.is_empty() && !folders.iter().any(|n| n.folder.eq_ignore_ascii_case(&f.folder)));
+    // A folder with a shortcut from Clipy takes it instead of the one it
+    // had; a row left with no shortcut by the import goes.
+    s.folder_shortcuts = std::mem::take(&mut s.folder_shortcuts)
+        .into_iter()
+        .filter(|f| !folders.iter().any(|n| n.folder.to_lowercase() == f.folder.to_lowercase()))
+        .filter_map(|f| {
+            let hotkey = free(&f.hotkey);
+            (hotkey.is_empty() == f.hotkey.trim().is_empty()).then_some(crate::settings::FolderShortcut { hotkey, ..f })
+        })
+        .collect();
     s.folder_shortcuts.extend(folders);
-    if s.hotkey.is_empty() {
-        s.hotkey = Settings::default().hotkey; // ⌘⌥V was taken by another and Clipy set none
-    }
     s.save(db);
 }
 
@@ -534,6 +544,8 @@ pub const KEYS: &[(&str, u16, &str)] = &[
     ("pageUp", 0x74, "PageUp"), ("forwardDelete", 0x75, "Delete"), ("f4", 0x76, "F4"), ("end", 0x77, "End"),
     ("f2", 0x78, "F2"), ("pageDown", 0x79, "PageDown"), ("f1", 0x7a, "F1"), ("leftArrow", 0x7b, "ArrowLeft"),
     ("rightArrow", 0x7c, "ArrowRight"), ("downArrow", 0x7d, "ArrowDown"), ("upArrow", 0x7e, "ArrowUp"),
+    // Japanese layouts: these sit where ANSI has [ = '.
+    ("atSign", 0x21, "BracketLeft"), ("caret", 0x18, "Equal"), ("colon", 0x27, "Quote"),
 ];
 
 /// Just enough JSON for Clipy's key combos.

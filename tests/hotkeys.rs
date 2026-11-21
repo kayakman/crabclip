@@ -8,9 +8,11 @@ fn lists_and_labels() {
     assert_eq!(hotkeys::split(" alt+shift+cmd+v ,ctrl+shift+cmd+v, "), vec!["alt+shift+cmd+v", "ctrl+shift+cmd+v"]);
     assert_eq!(hotkeys::split("cmd+,, ctrl+,"), vec!["cmd+,", "ctrl+,"], "a comma after + is the comma key");
     assert!(hotkeys::split("  ").is_empty());
+    assert_eq!(hotkeys::split(",cmd+v,, ctrl+v,"), vec!["cmd+v", "ctrl+v"], "stray commas are dropped");
     assert_eq!(hotkeys::label("cmd+ctrl+v"), "⌃⌘V");
     assert_eq!(hotkeys::label("ctrl+alt+shift+cmd+f"), "⌃⌥⇧⌘F");
     assert_eq!(hotkeys::labels("alt+shift+cmd+v, cmd+shift+Space"), "⌥⇧⌘V, ⇧⌘Space");
+    assert_eq!(hotkeys::labels("cmd+Comma, cmd+,, alt+BracketLeft, F5"), "⌘,, ⌘,, ⌥[, F5");
 }
 
 #[test]

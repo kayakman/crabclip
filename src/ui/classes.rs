@@ -256,6 +256,11 @@ define_class!(
             app().quit();
         }
 
+        #[unsafe(method(shortcutsFromNotification:))]
+        fn shortcuts_from_notification(&self, _n: Option<&AnyObject>) {
+            super::prefs::reload_hotkeys();
+        }
+
         #[unsafe(method(showFromNotification:))]
         fn show_from_notification(&self, _n: Option<&AnyObject>) {
             app().show();

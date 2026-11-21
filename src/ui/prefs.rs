@@ -245,7 +245,7 @@ fn fill(window: &NSWindow) {
     f.y -= 30.0;
     f.label("Show preferences with:");
     let prefs_hotkey = f.field(220.0, 316.0, &s.prefs_hotkey);
-    prefs_hotkey.setPlaceholderString(Some(&ns("none: ⌘, in the history"))); 
+    prefs_hotkey.setPlaceholderString(Some(&ns("none: ⌘, in the history")));
     unsafe {
         prefs_hotkey.setAction(Some(sel!(prefAction:)));
     }
@@ -704,7 +704,13 @@ fn set_hotkeys(typed: &str, edit: impl FnOnce(&mut Settings)) {
     let mut new = old.clone();
     edit(&mut new);
     let typed = hotkeys::split(typed);
-    let res = hotkeys::check(&new).and_then(|()| {
+    let res = match (hotkeys::check(&new), hotkeys::check(&old)) {
+        // A problem already there (settings from an older version) doesn't
+        // block other changes; a new one does.
+        (Err(e), Err(was)) if e == was => Ok(()),
+        (res, _) => res,
+    };
+    let res = res.and_then(|()| {
         *a.settings.borrow_mut() = new.clone();
         // One that was already out of reach (another app holds it) stays as it
         // was; only the ones just typed must work.
@@ -796,10 +802,27 @@ fn add_folder_shortcut() {
     });
 }
 
-/// After an import: shortcuts it brought in (Clipy's) take effect. Clipy
-/// still running would answer the same keys: offer to quit it.
-fn reload_hotkeys() {
+/// The preferences shortcut: brings them up, or closes them if they are in front.
+pub fn toggle() {
+    let w = PREFS.with(|p| p.borrow().as_ref().map(|p| p.window.clone()));
+    match w {
+        Some(w) if w.isVisible() && w.isKeyWindow() => w.close(),
+        _ => show(),
+    }
+}
+
+/// Shortcut settings saved by another process (an import) take effect.
+/// Typing in progress in their fields is dropped: ending it later would
+/// write the old values back.
+pub fn reload_hotkeys() {
     let a = app();
+    PREFS.with(|p| {
+        if let Some(p) = p.borrow().as_ref() {
+            for f in [&p.hotkey, &p.folder_hotkey, &p.prefs_hotkey].into_iter().chain(p.shortcut_rows.iter().map(|r| &r.hotkey)) {
+                f.abortEditing();
+            }
+        }
+    });
     let saved = Settings::load(&a.db);
     let changed = {
         let mut s = a.settings.borrow_mut();
@@ -810,11 +833,18 @@ fn reload_hotkeys() {
         s.folder_shortcuts = saved.folder_shortcuts;
         before != (s.hotkey.clone(), s.folder_hotkey.clone(), s.prefs_hotkey.clone(), s.folder_shortcuts.clone())
     };
-    if !changed {
-        return;
+    if changed {
+        log!("prefs: shortcuts reloaded");
+        a.register_hotkeys();
+        sync_hotkeys();
+        refill();
     }
-    a.register_hotkeys();
-    refill();
+}
+
+/// After importing Clipy's shortcuts: Clipy still running answers the same
+/// keys, so offer to quit it.
+fn offer_quit_clipy() {
+    let a = app();
     let clipy = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns(crate::clipy::BUNDLE));
     if clipy.is_empty()
         || !a.confirm(
@@ -840,9 +870,17 @@ fn reload_hotkeys() {
     });
 }
 
+/// After a Clipy import: its shortcuts (the summary counts them) are in.
+fn clipy_imported(summary: &str) {
+    reload_hotkeys();
+    if summary.contains(" shortcuts") {
+        offer_quit_clipy();
+    }
+}
+
 /// Runs an importer as a child process (they can load a whole archive in
 /// memory, which goes back to the system when it exits), then reports.
-fn run_import(args: Vec<String>, title: &'static str, after: fn()) {
+fn run_import(args: Vec<String>, title: &'static str, after: fn(&str)) {
     let exe = std::env::current_exe().unwrap_or_default();
     std::thread::spawn(move || {
         let out = std::process::Command::new(exe).args(&args).output();
@@ -856,12 +894,13 @@ fn run_import(args: Vec<String>, title: &'static str, after: fn()) {
             a.run_search(true);
             refresh_status();
             a.confirm(title, &msg, "OK");
-            after();
+            after(&msg);
         });
     });
 }
 
 fn import_collective() {
+    end_editing();
     let paths = crate::collective::default_paths();
     if paths.is_empty() {
         app().confirm("No Collective history found", "Collective's archive was not found in its container.", "OK");
@@ -874,7 +913,7 @@ fn import_collective() {
     ) {
         return;
     }
-    run_import(vec!["--import-collective".into()], "Collective import finished", || {});
+    run_import(vec!["--import-collective".into()], "Collective import finished", |_| {});
 }
 
 const CLIPY_TEXT: &str = "Its history (every format of each clip), its snippet folders in Clipy's order, \
@@ -883,6 +922,7 @@ const CLIPY_TEXT: &str = "Its history (every format of each clip), its snippet f
 
 /// Preferences › Import from Clipy: its database, or a file picked by hand.
 fn import_clipy() {
+    end_editing(); // what is typed in a shortcut field applies before the import
     let a = app();
     let path = match crate::clipy::default_db(true) {
         Some(p) => p,
@@ -912,7 +952,7 @@ fn import_clipy() {
     if !a.confirm("Import from Clipy?", CLIPY_TEXT, "Import") {
         return;
     }
-    run_import(vec!["--import-clipy".into(), path.display().to_string()], "Clipy import finished", reload_hotkeys);
+    run_import(vec!["--import-clipy".into(), path.display().to_string()], "Clipy import finished", clipy_imported);
 }
 
 /// Asked once, at a launch that finds Clipy's database.
@@ -921,6 +961,6 @@ pub fn offer_clipy() {
     let Some(path) = crate::clipy::default_db(false) else { return };
     let _ = a.db.set_setting("clipy_asked", "1");
     if a.confirm("Bring in your Clipy history and snippets?", CLIPY_TEXT, "Import") {
-        run_import(vec!["--import-clipy".into(), path.display().to_string()], "Clipy import finished", reload_hotkeys);
+        run_import(vec!["--import-clipy".into(), path.display().to_string()], "Clipy import finished", clipy_imported);
     }
 }
