@@ -1111,6 +1111,19 @@ impl Db {
         Self::folder_at(&self.conn, path, false)
     }
 
+    /// The folder at `path` or, if it is gone, its nearest parent still there
+    /// (0: none, the top level).
+    pub fn nearest_folder(&self, path: &str) -> Result<i64> {
+        let mut parts = folder_parts(path);
+        while !parts.is_empty() {
+            if let Some(id) = self.folder_id(&parts.join("/"))? {
+                return Ok(id);
+            }
+            parts.pop();
+        }
+        Ok(0)
+    }
+
     /// The folder at `path`, created if needed.
     pub fn make_folder(&self, path: &str) -> Result<i64> {
         Ok(Self::folder_at(&self.conn, path, true)?.unwrap_or(0))

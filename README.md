@@ -6,14 +6,17 @@ on a crash or restart, and years of history stay searchable without eating
 memory.
 
 - **⌘⌥V** opens the history (at its last position; first time under the menu bar crab claw).
+  Global shortcuts are yours to set: one or more for the history, the folders and
+  the preferences, and one for any folder you open often.
 - Every copy is written to SQLite immediately: all pasteboard representations
   byte-for-byte (zstd-compressed when it helps), source app, window title,
   document path, source URL, timestamps. Recall puts back exactly what was copied.
 - Text found in images (Apple Vision OCR) is searchable.
 - Tags, stars, an app filter, and an encrypted `password` tag for secrets.
 - Snippet folders: file clips in nested folders and browse them from the
-  keyboard (type `/`), or with their own global shortcut.
-- Imports the history of Clipy (history and snippet folders) or Collective.app
+  keyboard (type `/`), with their own global shortcut, or jump straight into
+  one with its shortcut.
+- Imports the history of Clipy (history, snippet folders and shortcuts) or Collective.app
   if you are coming from one of them.
 - Runs as a login agent that launchd restarts if it ever crashes.
 - Everything stays on your Mac: no network access, no telemetry.
@@ -55,10 +58,21 @@ starting with `/` browses them instead of the history: `/` lists the top
 level, ↑ ↓ move, → opens the selected folder (the search becomes
 `/Clients/`), ← goes back up, and text after the last `/` filters the
 folder. While a folder is selected the right pane shows what it holds; on a
-snippet it shows the value and ⏎ copies it like any clip. Preferences can set
-a second global shortcut that opens straight into the folders. Filed clips
+snippet it shows the value and ⏎ copies it like any clip. Filed clips
 are never pruned, like starred ones; a folder goes away when its last clip
 leaves it.
+
+Global shortcuts (Preferences): "Show history with", "Show folders with" and
+"Show preferences with" take one shortcut or several separated by commas
+(`alt+shift+cmd+v, ctrl+shift+cmd+v`), in global-hotkey syntax: modifiers
+`cmd`, `alt`, `ctrl`, `shift` and a key (`v`, `1`, `Space`, `F5`, `Comma`,
+`ArrowUp`…). Folder shortcuts open the history straight into one folder:
+"+ Add" a row, pick the folder (nested ones too) and set its shortcut; − removes
+it. A folder is remembered by its path: if it goes away (its last clip left, or
+its clips moved to another name), the row shows it as missing and the shortcut
+opens its nearest parent still there, or the top level, until a folder with
+that path is back. The same shortcut can't open two things; one another app
+already holds is reported when you set it.
 
 Clipy: Preferences › Import from Clipy brings in its history (every format of
 each clip) and its snippets, as folders in Clipy's order with their titles
@@ -66,6 +80,13 @@ each clip) and its snippets, as folders in Clipy's order with their titles
 from a terminal). It reads the current Clipy's `sqlite.db`; for an older
 Clipy, open the current version once (it converts its data) or import a
 snippets export (Clipy › Edit Snippets… › Export, an `.xml` file).
+Clipy's shortcuts come along and replace crabclip's: its main menu and history
+menu shortcuts both open the history, its snippets menu shortcut the folders,
+its settings shortcut the preferences, and each folder shortcut opens that
+folder (matched by Clipy's folder id, so not from an `.xml` export). Clipy's
+clear history and edit snippets shortcuts have no counterpart and are left out
+(the log says which). If Clipy is still running crabclip offers to quit it, so
+the two don't both answer the same keys; take it out of your login items too.
 
 Search: words match anywhere (text, OCR text, app, window title, path, URL;
 case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,
