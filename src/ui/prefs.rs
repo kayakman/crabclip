@@ -10,7 +10,7 @@ use objc2::{MainThreadMarker, MainThreadOnly, Message, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSFont, NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView, NSSlider, NSTextAlignment, NSTextField,
-    NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSToolbar, NSToolbarItem, NSView, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSNotification, NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::cell::RefCell;
@@ -42,6 +42,8 @@ struct Row {
 
 struct Prefs {
     window: Retained<NSWindow>,
+    /// The page of each tab.
+    tabs: Vec<Retained<NSView>>,
     hotkey: Retained<NSTextField>,
     folder_hotkey: Retained<NSTextField>,
     prefs_hotkey: Retained<NSTextField>,
@@ -147,6 +149,22 @@ impl Form<'_> {
         b
     }
 
+    /// A shortcut field with its Set button (both send `tag`).
+    fn hotkey(&mut self, text: &str, value: &str, placeholder: &str, tag: isize) -> Retained<NSTextField> {
+        self.label(text);
+        let f = self.field(220.0, 316.0, value);
+        if !placeholder.is_empty() {
+            f.setPlaceholderString(Some(&ns(placeholder)));
+        }
+        unsafe {
+            f.setAction(Some(sel!(prefAction:)));
+        }
+        f.setTag(tag);
+        self.button(540.0, 70.0, "Set", tag);
+        self.y -= 30.0;
+        f
+    }
+
     fn inline_label(&mut self, x: f64, w: f64, text: &str) {
         let l = NSTextField::labelWithString(&ns(text), self.mtm);
         l.setFrame(rect(x, self.y + 3.0, w, 18.0));
@@ -194,15 +212,25 @@ fn new_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         )
     };
     unsafe { window.setReleasedWhenClosed(false) };
-    window.setTitle(&ns("crabclip Preferences"));
+    let tab = TABS[current_tab()];
+    let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &ns("crabclip.prefs"));
+    toolbar.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*app().handler)));
+    toolbar.setSelectedItemIdentifier(Some(&ns(tab.0)));
+    window.setToolbar(Some(&toolbar));
+    window.setToolbarStyle(NSWindowToolbarStyle::Preference);
+    window.setTitle(&ns(tab.1));
     fill(&window);
     window
 }
 
 /// Debug aid (CRABCLIP_SNAPSHOT_PREFS): the Preferences window drawn far off
 /// every screen, never key, captured to `out`.
+/// CRABCLIP_SNAPSHOT_TAB=snippets picks the tab.
 pub fn snapshot(out: &str) {
     let window = new_window(app().mtm);
+    if let Some(i) = std::env::var("CRABCLIP_SNAPSHOT_TAB").ok().and_then(|t| TABS.iter().position(|(id, ..)| *id == t)) {
+        show_tab(i);
+    }
     window.setFrameTopLeftPoint(NSPoint::new(-30000.0, -30000.0));
     window.orderFrontRegardless();
     objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.8));
@@ -220,46 +248,32 @@ fn fill(window: &NSWindow) {
     let a = app();
     let mtm = a.mtm;
     let s = a.settings.borrow().clone();
-    // Laid out top down in room to spare, trimmed to what it used below.
-    let (w, h) = (664.0, 2000.0);
-    let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, h));
     let target: &AnyObject = &a.handler;
-    let mut f = Form { mtm, view: &view, y: h - 44.0, target };
+    let hotkey_note = "e.g. cmd+alt+v, ctrl+shift+space, cmd+shift+KeyC. Several: separate them with commas.";
 
-    f.label("Show history with:");
-    let hotkey = f.field(220.0, 316.0, &s.hotkey);
-    unsafe {
-        hotkey.setAction(Some(sel!(prefAction:)));
-    }
-    hotkey.setTag(101);
-    f.button(540.0, 70.0, "Set", 101);
+    // General
+    let general = page(mtm);
+    let mut f = Form { mtm, view: &general, y: PAGE_TOP, target };
+    let hotkey = f.hotkey("Show history with:", &s.hotkey, "", 101);
+    let prefs_hotkey = f.hotkey("Show preferences with:", &s.prefs_hotkey, "none: ⌘, in the history", 108);
+    f.note(hotkey_note);
+    f.label("Behavior:");
+    let login = f.check("Launch at login (restarts if it ever crashes)", s.launch_at_login);
+    let move_top = f.check("Move pasted clips to the top", s.move_to_top);
+    let enter_pastes = f.check("⏎ pastes into the app in front", s.enter_pastes);
+    f.note("Off: ⏎ only copies the clip. ⌘⏎ always does the other.");
+    f.label("Accessibility:");
+    let ax = NSTextField::labelWithString(&ns(""), mtm);
+    ax.setFrame(rect(220.0, f.y + 3.0, 200.0, 18.0));
+    general.addSubview(&ax);
+    f.button(400.0, 160.0, "Open Settings…", 104);
     f.y -= 30.0;
-    f.label("Show folders with:");
-    let folder_hotkey = f.field(220.0, 316.0, &s.folder_hotkey);
-    folder_hotkey.setPlaceholderString(Some(&ns("none: type / in the history")));
-    unsafe {
-        folder_hotkey.setAction(Some(sel!(prefAction:)));
-    }
-    folder_hotkey.setTag(106);
-    f.button(540.0, 70.0, "Set", 106);
-    f.y -= 30.0;
-    f.label("Show preferences with:");
-    let prefs_hotkey = f.field(220.0, 316.0, &s.prefs_hotkey);
-    prefs_hotkey.setPlaceholderString(Some(&ns("none: ⌘, in the history")));
-    unsafe {
-        prefs_hotkey.setAction(Some(sel!(prefAction:)));
-    }
-    prefs_hotkey.setTag(108);
-    f.button(540.0, 70.0, "Set", 108);
-    f.y -= 30.0;
-    f.note("e.g. cmd+alt+v, ctrl+shift+space, cmd+shift+KeyC. Several: separate them with commas.");
+    f.note("Needed to paste into the frontmost app (⏎) and to record window titles and documents.");
+    trim(&general, f.y);
 
-    f.label("Folder shortcuts:");
-    let shortcut_rows = folder_rows(&mut f, &s);
-    f.button(216.0, 80.0, "+ Add", 107);
-    f.inline_label(304.0, 300.0, "Opens the history straight into that folder.");
-    f.y -= 40.0;
-
+    // Appearance
+    let appearance = page(mtm);
+    let mut f = Form { mtm, view: &appearance, y: PAGE_TOP, target };
     let open_idx = OPEN_AT.iter().position(|(k, _)| *k == s.open_at).unwrap_or(0);
     let open_at = f.popup("Open window at:", &OPEN_AT.iter().map(|(_, t)| *t).collect::<Vec<_>>(), open_idx);
     let row_idx = ROWS.iter().position(|(v, _)| (*v - s.row_height).abs() < 1.0).unwrap_or(1);
@@ -267,7 +281,6 @@ fn fill(window: &NSWindow) {
     let font_idx = FONTS.iter().position(|v| (*v - s.font_size).abs() < 0.5).unwrap_or(2);
     let font_titles: Vec<String> = FONTS.iter().map(|v| if *v == 13.0 { format!("{v} pt (default)") } else { format!("{v} pt") }).collect();
     let font = f.popup("Text size:", &font_titles.iter().map(|t| t.as_str()).collect::<Vec<_>>(), font_idx);
-
     f.label("Interface size:");
     let scale = unsafe {
         NSSlider::sliderWithValue_minValue_maxValue_target_action(
@@ -283,21 +296,27 @@ fn fill(window: &NSWindow) {
     scale.setNumberOfTickMarks(UI_SCALES.len() as isize);
     scale.setAllowsTickMarkValuesOnly(true);
     scale.setContinuous(false);
-    view.addSubview(&scale);
+    appearance.addSubview(&scale);
     let scale_label = NSTextField::labelWithString(&ns(&format!("{}%", s.ui_scale)), mtm);
     scale_label.setFrame(rect(458.0, f.y + 3.0, 60.0, 18.0));
-    view.addSubview(&scale_label);
+    appearance.addSubview(&scale_label);
     f.y -= 30.0;
     f.note("Zooms the whole window: text, rows, icons and its size.");
+    trim(&appearance, f.y);
 
-    f.label("General:");
-    let login = f.check("Launch at login (restarts if it ever crashes)", s.launch_at_login);
-    let move_top = f.check("Move pasted clips to the top", s.move_to_top);
-    let enter_pastes = f.check("⏎ pastes into the app in front", s.enter_pastes);
-    f.note("Off: ⏎ only copies the clip. ⌘⏎ always does the other.");
+    // History
+    let history = page(mtm);
+    let mut f = Form { mtm, view: &history, y: PAGE_TOP, target };
+    let keep_idx = KEEP.iter().position(|(v, _)| *v == s.keep_days).unwrap_or(0);
+    let keep = f.popup("Keep history:", &KEEP.iter().map(|(_, t)| *t).collect::<Vec<_>>(), keep_idx);
+    f.note("Starred clips and clips in folders are always kept.");
+    f.label("Ignore apps (bundle ids):");
+    let ignore = f.field(220.0, 330.0, &s.ignore_apps.join(", "));
+    f.y -= 30.0;
+    f.note("Password-manager copies marked concealed are never recorded.");
+    f.label("Search:");
     let ocr = f.check("Recognize text in images (searchable)", s.ocr);
     f.y -= 6.0;
-
     f.label("Store images larger than:");
     let img_mp = f.field(220.0, 50.0, &format!("{}", s.img_scale_min_mp));
     f.inline_label(276.0, 60.0, "MP at");
@@ -305,47 +324,50 @@ fn fill(window: &NSWindow) {
     f.inline_label(378.0, 140.0, "% of their size");
     f.y -= 30.0;
     f.note("100% keeps every image byte-for-byte (default). Smaller images are always kept as-is; pasting uses what is stored.");
-
     let zstd_idx = ZSTD.iter().position(|(v, _)| *v == s.zstd_level).unwrap_or(1);
     let zstd = f.popup("Compression:", &ZSTD.iter().map(|(_, t)| *t).collect::<Vec<_>>(), zstd_idx);
-    let keep_idx = KEEP.iter().position(|(v, _)| *v == s.keep_days).unwrap_or(0);
-    let keep = f.popup("Keep history:", &KEEP.iter().map(|(_, t)| *t).collect::<Vec<_>>(), keep_idx);
-    f.note("Starred clips and clips in folders are always kept.");
-
-    f.label("Ignore apps (bundle ids):");
-    let ignore = f.field(220.0, 330.0, &s.ignore_apps.join(", "));
-    f.y -= 30.0;
-    f.note("Password-manager copies marked concealed are never recorded.");
-
     f.label("Database:");
     let stats = NSTextField::labelWithString(&ns(""), mtm);
     stats.setFrame(rect(220.0, f.y + 3.0, 340.0, 18.0));
-    view.addSubview(&stats);
+    history.addSubview(&stats);
     f.y -= 30.0;
     f.button(216.0, 150.0, "Reveal in Finder", 102);
-    f.button(370.0, 190.0, "Import Collective history", 103);
-    f.y -= 34.0;
-    f.button(370.0, 190.0, "Import from Clipy…", 105);
-    f.y -= 40.0;
-
-    f.label("Accessibility:");
-    let ax = NSTextField::labelWithString(&ns(""), mtm);
-    ax.setFrame(rect(220.0, f.y + 3.0, 200.0, 18.0));
-    view.addSubview(&ax);
-    f.button(400.0, 160.0, "Open Settings…", 104);
     f.y -= 30.0;
-    f.note("Needed to paste into the frontmost app (⏎) and to record window titles and documents.");
+    trim(&history, f.y);
 
-    let spare = f.y + 12.0;
-    for v in view.subviews().iter() {
-        let o = v.frame().origin;
-        v.setFrameOrigin(NSPoint::new(o.x, o.y - spare));
-    }
-    view.setFrameSize(NSSize::new(w, h - spare));
-    set_content(window, &view);
+    // Snippets
+    let snippets = page(mtm);
+    let mut f = Form { mtm, view: &snippets, y: PAGE_TOP, target };
+    let folder_hotkey = f.hotkey("Show folders with:", &s.folder_hotkey, "none: type / in the history", 106);
+    f.note(hotkey_note);
+    f.label("Folder shortcuts:");
+    let shortcut_rows = folder_rows(&mut f, &s);
+    f.button(216.0, 80.0, "+ Add", 107);
+    f.inline_label(304.0, 300.0, "Opens the history straight into that folder.");
+    f.y -= 30.0;
+    f.note("⌘L in the history files a clip in folders (type / there for the list of them); / in its search browses them.");
+    trim(&snippets, f.y);
+
+    // Import
+    let import = page(mtm);
+    let mut f = Form { mtm, view: &import, y: PAGE_TOP, target };
+    f.label("Clipy:");
+    f.button(216.0, 190.0, "Import from Clipy…", 105);
+    f.y -= 30.0;
+    f.note("Its history, its snippet folders and its shortcuts (they replace crabclip's).");
+    f.label("Collective:");
+    f.button(216.0, 190.0, "Import Collective history", 103);
+    f.y -= 30.0;
+    f.note("Quit Collective first so it saves its latest clips.");
+    f.note("Clips already in crabclip are merged, not duplicated: importing again is safe.");
+    trim(&import, f.y);
+
+    let tabs = vec![general, appearance, history, snippets, import];
+    set_content(window, &tabs[current_tab()]);
     PREFS.with(|p| {
         *p.borrow_mut() = Some(Prefs {
             window: window.retain(),
+            tabs,
             hotkey,
             folder_hotkey,
             prefs_hotkey,
@@ -369,6 +391,77 @@ fn fill(window: &NSWindow) {
         })
     });
     refresh_status();
+}
+
+/// Width of the Preferences window; a page is laid out top down from
+/// `PAGE_TOP` in room to spare, then trimmed to what it used.
+const PAGE_W: f64 = 664.0;
+const PAGE_H: f64 = 2000.0;
+const PAGE_TOP: f64 = PAGE_H - 36.0;
+
+fn page(mtm: MainThreadMarker) -> Retained<NSView> {
+    NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, PAGE_W, PAGE_H))
+}
+
+/// Cut a page down to what its form used (`y`: where its next row would go).
+fn trim(view: &NSView, y: f64) {
+    let spare = y + 12.0;
+    for v in view.subviews().iter() {
+        let o = v.frame().origin;
+        v.setFrameOrigin(NSPoint::new(o.x, o.y - spare));
+    }
+    view.setFrameSize(NSSize::new(PAGE_W, PAGE_H - spare));
+}
+
+/// Preferences tabs: toolbar item id, title, SF Symbol.
+const TABS: &[(&str, &str, &str)] = &[
+    ("general", "General", "gearshape"),
+    ("appearance", "Appearance", "paintbrush"),
+    ("history", "History", "clock.arrow.circlepath"),
+    ("snippets", "Snippets", "folder"),
+    ("import", "Import", "square.and.arrow.down"),
+];
+
+/// The tab shown, as left last time.
+fn current_tab() -> usize {
+    app().db.get_setting("prefs_tab").and_then(|t| TABS.iter().position(|(id, ..)| *id == t)).unwrap_or(0)
+}
+
+pub fn tab_ids() -> Retained<NSArray<NSString>> {
+    let ids: Vec<Retained<NSString>> = TABS.iter().map(|(id, ..)| ns(id)).collect();
+    NSArray::from_retained_slice(&ids)
+}
+
+pub fn tab_item(id: &str) -> Option<Retained<NSToolbarItem>> {
+    let (_, title, symbol) = TABS.iter().find(|(i, ..)| *i == id)?;
+    let mtm = app().mtm;
+    let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), &ns(id));
+    item.setLabel(&ns(title));
+    item.setImage(super::symbol(symbol).as_deref());
+    unsafe {
+        item.setTarget(Some(&app().handler));
+        item.setAction(Some(sel!(prefTab:)));
+    }
+    Some(item)
+}
+
+/// A toolbar tab was clicked: show its page (the window takes its height).
+pub fn select_tab(id: &str) {
+    if let Some(i) = TABS.iter().position(|(t, ..)| *t == id) {
+        let _ = app().db.set_setting("prefs_tab", id);
+        show_tab(i);
+    }
+}
+
+fn show_tab(i: usize) {
+    let w = PREFS.with(|p| p.borrow().as_ref().map(|p| (p.window.clone(), p.tabs[i].clone())));
+    let Some((w, page)) = w else { return };
+    w.makeFirstResponder(None); // a field being typed in applies first
+    if let Some(tb) = w.toolbar() {
+        tb.setSelectedItemIdentifier(Some(&ns(TABS[i].0)));
+    }
+    w.setTitle(&ns(TABS[i].1));
+    set_content(&w, &page);
 }
 
 /// The folder shortcut rows: folder popup, shortcut, Set, −. Past

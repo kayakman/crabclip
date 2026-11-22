@@ -62,19 +62,19 @@ snippet it shows the value and ⏎ copies it like any clip. Filed clips
 are never pruned, like starred ones; a folder goes away when its last clip
 leaves it.
 
-Global shortcuts (Preferences): "Show history with", "Show folders with" and
-"Show preferences with" take one shortcut or several separated by commas
-(`alt+shift+cmd+v, ctrl+shift+cmd+v`), in global-hotkey syntax: modifiers
-`cmd`, `alt`, `ctrl`, `shift` and a key (`v`, `1`, `Space`, `F5`, `Comma`,
-`ArrowUp`…). Folder shortcuts open the history straight into one folder:
-"+ Add" a row, pick the folder (nested ones too) and set its shortcut; − removes
-it. A folder is remembered by its path: if it goes away (its last clip left, or
-its clips moved to another name), the row shows it as missing and the shortcut
-opens its nearest parent still there, or the top level, until a folder with
-that path is back. The same shortcut can't open two things; one another app
-already holds is reported when you set it.
+Global shortcuts (Preferences › General and › Snippets): "Show history with",
+"Show folders with" and "Show preferences with" take one shortcut or several
+separated by commas (`alt+shift+cmd+v, ctrl+shift+cmd+v`), in global-hotkey
+syntax: modifiers `cmd`, `alt`, `ctrl`, `shift` and a key (`v`, `1`, `Space`,
+`F5`, `Comma`, `ArrowUp`…). Folder shortcuts (Preferences › Snippets) open the
+history straight into one folder: "+ Add" a row, pick the folder (nested ones
+too) and set its shortcut; − removes it. A folder is remembered by its path: if
+it goes away (its last clip left, or its clips moved to another name), the row
+shows it as missing and the shortcut opens its nearest parent still there, or
+the top level, until a folder with that path is back. The same shortcut can't
+open two things.
 
-Clipy: Preferences › Import from Clipy brings in its history (every format of
+Clipy: Preferences › Import › Import from Clipy brings in its history (every format of
 each clip) and its snippets, as folders in Clipy's order with their titles
 (asked once at launch when Clipy's data is found; `crabclip --import-clipy`
 from a terminal). It reads the current Clipy's `sqlite.db`; for an older
@@ -96,8 +96,13 @@ case and accent insensitive). Operators: `"exact phrase"`, `-exclude`,
 `app:chrome`, `type:image|text|url|file`, `is:star`, `tag:name`. Folder
 names and snippet titles are searchable words too.
 
-Preferences also set the text size and an interface size slider (70–125%, in 5% steps below 100%)
-that zooms the whole window: text, rows, icons and the window itself.
+Preferences has five tabs: General (history and preferences shortcuts, launch
+at login, ⏎ behavior, Accessibility), Appearance (where the window opens, row
+and text size, and an interface size slider, 70–125% in 5% steps below 100%,
+that zooms the whole window: text, rows, icons and the window itself), History
+(how long clips are kept, ignored apps, text in images, image size and
+compression, the database), Snippets (the folders shortcut and folder
+shortcuts) and Import (Clipy, Collective). It opens on the tab used last.
 
 ## Install
 
