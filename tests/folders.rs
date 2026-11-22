@@ -488,7 +488,7 @@ fn snippet_editor_operations() {
     let n = db.count().unwrap();
     assert_eq!(db.set_text(a, &cap("VPN secret thing"), 3).unwrap(), b);
     assert_eq!(db.count().unwrap(), n - 1);
-    assert_eq!(labels(&db.folder_entries(formosa, "").unwrap()), vec!["VPN secret thing"], "b was already there");
+    assert_eq!(labels(&db.folder_entries(formosa, "").unwrap()), vec!["Deploy"], "b was already there; the title typed wins");
 
     // Move keeps the title; unfile and delete_folder keep the clip in the history.
     db.set_snippet_title(general, b, "VPN").unwrap();
@@ -539,4 +539,48 @@ fn drag_and_drop_order() {
     assert_eq!(search(&db, "A/C").len(), 2, "clips are found by the new path");
     db.new_folder(0, "C").unwrap();
     assert!(db.place_folder(c, 0, 0).is_err(), "a C is already at the top");
+}
+
+#[test]
+fn editor_review_cases() {
+    let db = Db::open_memory().unwrap();
+    let s = Settings::default();
+    // Ties in position (an import into a folder that had snippets): a drag
+    // works on the order shown.
+    let ids: Vec<i64> = ["a", "b", "c", "d"].iter().enumerate().map(|(i, t)| insert(&db, i as i64 + 1, t)).collect();
+    db.set_folders(ids[0], &["F".into()]).unwrap();
+    let f = db.folder_id("F").unwrap().unwrap();
+    for (id, t) in ids.iter().zip(["a", "b", "c", "d"]) {
+        db.file_snippet(f, *id, t, Some(0)).unwrap();
+    }
+    assert_eq!(labels(&db.folder_entries(f, "").unwrap()), vec!["a", "b", "c", "d"]);
+    db.place_snippet(ids[0], f, f, 1).unwrap();
+    assert_eq!(labels(&db.folder_entries(f, "").unwrap()), vec!["b", "a", "c", "d"]);
+
+    // Dragged into a folder that already holds that clip: one entry, its title.
+    db.set_folders(ids[1], &["F".into(), "G".into()]).unwrap();
+    let g = db.folder_id("G").unwrap().unwrap();
+    db.set_snippet_title(g, ids[1], "B in G").unwrap();
+    db.place_snippet(ids[1], g, f, 0).unwrap();
+    assert_eq!(labels(&db.folder_entries(f, "").unwrap()), vec!["B in G", "a", "c", "d"]);
+
+    // Edited to another clip's text: titles typed win, tags and star come along.
+    let x = insert(&db, 10, "x text");
+    let y = insert(&db, 11, "y text");
+    db.set_folders(x, &["F".into()]).unwrap();
+    db.set_folders(y, &["F".into()]).unwrap();
+    db.set_snippet_title(f, x, "typed title").unwrap();
+    db.set_star(x, true).unwrap();
+    db.set_tags(x, &["work".into()]).unwrap();
+    let cap = crabclip::ingest::build(
+        Capture { ts: 12, reps: vec![Rep { item: 0, uti: "public.utf8-plain-text".into(), data: b"y text".to_vec() }], ..Default::default() },
+        &s,
+    )
+    .unwrap();
+    assert_eq!(db.set_text(x, &cap, 3).unwrap(), y);
+    assert!(db.detail(x).unwrap().is_none());
+    assert_eq!(db.snippet_title(f, y).unwrap(), "typed title");
+    assert!(db.tags(y).unwrap().contains(&"work".to_string()));
+    assert_eq!(search(&db, "is:star"), vec![y]);
+    assert!(db.is_filed(f, y) && !db.is_filed(f, x));
 }

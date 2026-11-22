@@ -9,7 +9,7 @@ use crate::ingest::Capture;
 use crate::{hotkeys, log};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, Message, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBezelStyle, NSControlTextEditingDelegate, NSBorderType, NSButton, NSColor, NSDragOperation, NSDraggingInfo, NSFont,
     NSImageView, NSOutlineView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSPasteboardItem, NSPasteboardWriting,
@@ -179,6 +179,9 @@ define_class!(
         #[unsafe(method(snippetAction:))]
         fn snippet_action(&self, sender: Option<&AnyObject>) {
             let tag: isize = sender.map(|s| unsafe { msg_send![s, tag] }).unwrap_or(0);
+            // Preferences may be laid out again meanwhile (an alert lets the
+            // main queue run): this editor lives till the action is done.
+            let _keep = self.retain();
             self.action(tag);
         }
     }
@@ -499,7 +502,11 @@ impl Editor {
 
     /// The selection changed: keep what was being edited, show the new one.
     fn selected(&self) {
-        self.save_edits();
+        if self.save_edits() {
+            // A snippet came or went: show the rows anew once this
+            // selection change is done.
+            dispatch2::DispatchQueue::main().exec_async(super::prefs::reload_snippet_editor);
+        }
         let shown = match self.selected_item() {
             Some(Item::Folder(id)) => Shown::Folder(id),
             Some(Item::Snippet { folder, clip }) => Shown::Snippet { folder, clip },
@@ -530,6 +537,7 @@ impl Editor {
                     count(kids.len() - nf, "snippet", "snippets"),
                 )));
             }
+            Shown::Snippet { folder, clip } if !a.db.is_filed(folder, clip) => self.show(Shown::Nothing),
             Shown::Snippet { folder, clip } => {
                 let d = a.db.detail(clip).ok().flatten();
                 let sealed = a.db.is_sealed(clip);
@@ -539,15 +547,18 @@ impl Editor {
                     0 => format!("In /{path}"),
                     n => format!("In /{path} and {n} other folder{}", if n == 1 { "" } else { "s" }),
                 };
+                let why = d.as_ref().and_then(|d| not_editable(d, sealed));
+                let rich = d.as_ref().is_some_and(|d| why.is_none() && is_rich(d));
+                let head = match (&why, rich) {
+                    (Some(w), _) => format!("{head} · {w}"),
+                    (None, true) => format!("{head} · editing its text drops its formatting"),
+                    _ => head,
+                };
                 ui.snippet_head.setStringValue(&ns(&head));
                 ui.title.setStringValue(&ns(&a.db.snippet_title(folder, clip).unwrap_or_default()));
-                let text = if sealed {
-                    "(encrypted: remove its password tag to edit it)".to_string()
-                } else {
-                    d.and_then(|d| d.text).unwrap_or_default()
-                };
+                let text = if sealed { String::new() } else { d.and_then(|d| d.text).unwrap_or_default() };
                 ui.text.setString(&ns(&text));
-                ui.text.setEditable(!sealed);
+                ui.text.setEditable(why.is_none());
             }
             Shown::New { folder } => {
                 let path = a.db.folder_path(folder).unwrap_or_default();
@@ -570,53 +581,66 @@ impl Editor {
         ui.gone.setStringValue(&ns(&format!("Shortcuts for folders no longer here: {list}")));
     }
 
-    /// Keep what was typed in the snippet pane (moving away saves, like Clipy).
-    pub fn save_edits(&self) {
+    /// Keep what was typed in the snippet pane (moving away saves, like
+    /// Clipy). True when rows came or went (a new snippet, or one merged
+    /// into the clip that already had its text): the outline needs a reload.
+    pub fn save_edits(&self) -> bool {
         let a = app();
         let ui = self.ui();
         let title = ui.title.stringValue().to_string().trim().to_string();
         let text = ui.text.string().to_string();
+        let level = a.settings.borrow().zstd_level;
         match self.ivars().shown.get() {
             Shown::Snippet { folder, clip } => {
+                // Gone meanwhile (deleted in the history): nothing to keep.
+                if !a.db.is_filed(folder, clip) {
+                    self.ivars().shown.set(Shown::Nothing);
+                    return true;
+                }
+                let it = Item::Snippet { folder, clip };
                 if a.db.snippet_title(folder, clip).unwrap_or_default() != title {
                     if let Err(e) = a.db.set_snippet_title(folder, clip, &title) {
                         log!("snippets: title: {e}");
                     }
-                    self.relabel(Item::Snippet { folder, clip });
+                    self.relabel(it);
                 }
-                if a.db.is_sealed(clip) {
-                    return;
+                let Some(d) = a.db.detail(clip).ok().flatten() else { return false };
+                if not_editable(&d, a.db.is_sealed(clip)).is_some() {
+                    return false;
                 }
-                let old = a.db.detail(clip).ok().flatten().and_then(|d| d.text).unwrap_or_default();
+                let old = d.text.unwrap_or_default();
                 if old == text {
-                    return;
+                    return false;
                 }
                 if text.trim().is_empty() {
                     ui.text.setString(&ns(&old));
                     a.confirm("A snippet needs text", "To take it out of its folder use −.", "OK");
-                    return;
+                    return false;
                 }
-                let Some(c) = text_clip(&text, crate::timefmt::now_ms()) else { return };
-                match a.db.set_text(clip, &c, a.settings.borrow().zstd_level) {
+                let Some(c) = text_clip(&text, crate::timefmt::now_ms()) else { return false };
+                match a.db.set_text(clip, &c, level) {
                     Ok(id) => {
                         log!("snippets: clip {clip} edited");
+                        history_changed();
                         if id != clip {
                             self.ivars().shown.set(Shown::Snippet { folder, clip: id });
+                            return true;
                         }
-                        history_changed();
+                        self.relabel(it); // an untitled snippet shows its text
+                        false
                     }
                     Err(e) => {
                         a.confirm("Couldn't save the snippet", &e, "OK");
+                        false
                     }
                 }
             }
             Shown::New { folder } => {
                 if text.trim().is_empty() {
-                    return; // nothing written: nothing to keep
+                    return false; // nothing written: nothing to keep
                 }
                 let ts = a.db.snippet_ts().unwrap_or_else(|_| crate::timefmt::now_ms());
-                let Some(c) = text_clip(&text, ts) else { return };
-                let level = a.settings.borrow().zstd_level;
+                let Some(c) = text_clip(&text, ts) else { return false };
                 // Text already in the history: that clip is filed.
                 match a.db.insert_imported(&c, level, false).and_then(|ins| {
                     a.db.file_snippet(folder, ins.id(), &title, None)?;
@@ -626,14 +650,28 @@ impl Editor {
                         log!("snippets: new snippet {id} in folder {folder}");
                         self.ivars().shown.set(Shown::Snippet { folder, clip: id });
                         history_changed();
+                        true
                     }
                     Err(e) => {
                         a.confirm("Couldn't save the snippet", &e.to_string(), "OK");
+                        false
                     }
                 }
             }
-            _ => {}
+            _ => false,
         }
+    }
+
+    /// Preferences close (or the app quits): keep the edits, and show
+    /// nothing, so a later reopening doesn't save this pane again.
+    pub fn leave(&self) {
+        self.save_edits();
+        self.show(Shown::Nothing);
+    }
+
+    /// The rows anew (snippets came or went), the selection kept.
+    pub fn refresh(&self) {
+        self.reload(None);
     }
 
     /// A row's label changed (a title): show it.
@@ -657,6 +695,11 @@ impl Editor {
     }
 
     fn action(&self, tag: isize) {
+        // A name or shortcut being typed is applied first (its field sends
+        // its own action as editing ends), while the pane still shows it.
+        if let Some(w) = self.ui().outline.window() {
+            w.makeFirstResponder(None);
+        }
         match tag {
             ADD_FOLDER => self.add_folder(),
             ADD_SNIPPET => self.add_snippet(),
@@ -887,14 +930,19 @@ impl Editor {
     /// Carry out a drop: `at` counts the outline's children of `folder`.
     fn dropped(&self, it: Item, folder: i64, at: NSInteger) -> bool {
         let a = app();
-        self.save_edits();
+        if self.save_edits() {
+            // Saving changed the rows (the dragged one may be gone): start over.
+            self.reload(None);
+            return false;
+        }
         let kids = self.kids_of(folder);
         let res = match it {
             Item::Snippet { folder: from, clip } => {
                 // Counted without the dragged one, as place_snippet does.
+                // Counted without the dragged clip, here or already in `folder`.
                 let before = kids[..(at.max(0) as usize).min(kids.len())]
                     .iter()
-                    .filter(|k| matches!(k, Item::Snippet { .. }) && **k != it)
+                    .filter(|k| matches!(k, Item::Snippet { clip: c, .. } if *c != clip))
                     .count();
                 a.db.place_snippet(clip, from, folder, before).map(|()| Item::Snippet { folder, clip }).map_err(|e| e.to_string())
             }
@@ -927,6 +975,23 @@ impl Editor {
             }
         }
     }
+}
+
+/// Why a snippet's text can't be edited here, if it can't.
+fn not_editable(d: &crate::db::Detail, sealed: bool) -> Option<&'static str> {
+    use crate::db::Kind;
+    if sealed {
+        Some("encrypted: remove its password tag to edit it")
+    } else if !matches!(d.kind, Kind::Text | Kind::Url) {
+        Some("not text: only its title can be changed here")
+    } else {
+        None
+    }
+}
+
+/// Text with formatting (RTF, HTML) besides the plain text.
+fn is_rich(d: &crate::db::Detail) -> bool {
+    d.types.split(',').any(|t| matches!(t.trim(), "public.rtf" | "public.html" | "Apple HTML pasteboard type" | "NeXT Rich Text Format v1.0 pasteboard type"))
 }
 
 /// A folder's shortcut as set ("" for none).

@@ -480,11 +480,18 @@ fn set_content(window: &NSWindow, view: &NSView) {
     }
 }
 
-/// A snippet being edited is kept before the editor goes or hides.
-fn save_snippet_edits() {
+/// A snippet being edited is kept before the editor goes or hides (or the app quits).
+pub(super) fn save_snippet_edits() {
     let ed = PREFS.with(|p| p.borrow().as_ref().map(|p| p.editor.clone()));
     if let Some(ed) = ed {
         ed.save_edits();
+    }
+}
+
+/// The snippet editor's rows anew (after a save added or merged one).
+pub(super) fn reload_snippet_editor() {
+    if let Some(ed) = PREFS.with(|p| p.borrow().as_ref().map(|p| p.editor.clone())) {
+        ed.refresh();
     }
 }
 
@@ -506,7 +513,9 @@ pub fn closing(n: &NSNotification) {
         })
     });
     if is_prefs {
-        save_snippet_edits();
+        if let Some(ed) = PREFS.with(|p| p.borrow().as_ref().map(|p| p.editor.clone())) {
+            ed.leave();
+        }
         dispatch2::DispatchQueue::main().exec_async(|| {
             let a = app();
             if a.ui().panel.isVisible() {

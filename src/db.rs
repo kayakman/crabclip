@@ -795,6 +795,11 @@ impl Db {
 
     pub fn delete(&self, id: i64) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        Self::delete_in(&tx, id)?;
+        tx.commit()
+    }
+
+    fn delete_in(tx: &Connection, id: i64) -> Result<()> {
         tx.execute("DELETE FROM fts WHERE rowid=?", [id])?;
         tx.execute("DELETE FROM reps WHERE clip_id=?", [id])?;
         tx.execute("DELETE FROM tags WHERE clip_id=?", [id])?;
@@ -807,7 +812,7 @@ impl Db {
             Self::prune_folder(&tx, f)?;
         }
         tx.execute("DELETE FROM clips WHERE id=?", [id])?;
-        tx.commit()
+        Ok(())
     }
 
     /// Delete clips last copied before `before_ms` (None: all). Starred clips and
@@ -1427,12 +1432,21 @@ impl Db {
             .optional()?
             .unwrap_or_default();
         let mut order: Vec<i64> = {
-            let mut st = tx.prepare("SELECT clip_id FROM snippets WHERE folder_id=? AND clip_id<>? ORDER BY pos")?;
+            // In the order the folder is shown (folder_entries), ties included.
+            let mut st = tx.prepare(
+                "SELECT s.clip_id FROM snippets s JOIN clips c ON c.id=s.clip_id WHERE s.folder_id=? AND s.clip_id<>? \
+                 ORDER BY s.pos, s.title COLLATE NOCASE, c.copied_at DESC",
+            )?;
             st.query_map(params![to, clip], |r| r.get(0))?.collect::<Result<_>>()?
         };
         order.insert(index.min(order.len()), clip);
         if from != to {
-            tx.execute("INSERT OR IGNORE INTO snippets(folder_id, clip_id, title) VALUES(?, ?, ?)", params![to, clip, title])?;
+            // Already in `to` too: one entry, with the dragged one's title if it has one.
+            tx.execute(
+                "INSERT INTO snippets(folder_id, clip_id, title) VALUES(?, ?, ?) \
+                 ON CONFLICT(folder_id, clip_id) DO UPDATE SET title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE title END",
+                params![to, clip, title],
+            )?;
             tx.execute("DELETE FROM snippets WHERE folder_id=? AND clip_id=?", params![from, clip])?;
         }
         for (pos, c) in order.iter().enumerate() {
@@ -1485,6 +1499,13 @@ impl Db {
         self.folder_path(id).map_err(e)
     }
 
+    /// Clip `clip` is filed in folder `folder`.
+    pub fn is_filed(&self, folder: i64, clip: i64) -> bool {
+        self.conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM snippets WHERE folder_id=? AND clip_id=?)", params![folder, clip], |r| r.get(0))
+            .unwrap_or(false)
+    }
+
     /// A snippet's own title in a folder ("" when it shows its text).
     pub fn snippet_title(&self, folder: i64, clip: i64) -> Result<String> {
         self.conn
@@ -1514,8 +1535,9 @@ impl Db {
 
     /// Give clip `id` the text of `c` (a text clip from ingest::build), where
     /// it is: folders, titles, tags, stars and dates stay. If another clip
-    /// already holds that text, that one takes this one's place in its
-    /// folders instead and this one goes. Returns the clip that has the text.
+    /// already holds that text, that one takes this one's place: it gets its
+    /// folders (this one's titles win), tags and star, and this one goes.
+    /// Returns the clip that has the text.
     pub fn set_text(&self, id: i64, c: &NewClip, level: i32) -> std::result::Result<i64, String> {
         let e = |e: rusqlite::Error| e.to_string();
         if self.is_sealed(id) {
@@ -1527,14 +1549,25 @@ impl Db {
             if other != id {
                 let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate).map_err(e)?;
                 tx.execute(
-                    "INSERT OR IGNORE INTO snippets(folder_id, clip_id, title, pos) \
-                     SELECT folder_id, ?2, title, pos FROM snippets WHERE clip_id=?1",
+                    "INSERT INTO snippets(folder_id, clip_id, title, pos) \
+                     SELECT folder_id, ?2, title, pos FROM snippets WHERE clip_id=?1 \
+                     ON CONFLICT(folder_id, clip_id) DO UPDATE SET \
+                     title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE title END",
                     params![id, other],
                 )
                 .map_err(e)?;
+                tx.execute("INSERT OR IGNORE INTO tags(clip_id, tag) SELECT ?2, tag FROM tags WHERE clip_id=?1", params![id, other])
+                    .map_err(e)?;
+                tx.execute(
+                    "UPDATE clips SET starred=MAX(starred, (SELECT starred FROM clips WHERE id=?1)) WHERE id=?2",
+                    params![id, other],
+                )
+                .map_err(e)?;
+                // Its folders now hold the other clip: nothing to prune.
+                tx.execute("DELETE FROM snippets WHERE clip_id=?", [id]).map_err(e)?;
+                Self::delete_in(&tx, id).map_err(e)?;
                 Self::reindex(&tx, other).map_err(e)?;
                 tx.commit().map_err(e)?;
-                self.delete(id).map_err(e)?;
             }
             return Ok(other);
         }

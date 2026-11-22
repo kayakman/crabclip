@@ -31,6 +31,7 @@ define_class!(
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            super::prefs::save_snippet_edits();
             app().finish_delete();
         }
 
