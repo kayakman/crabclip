@@ -2,7 +2,7 @@
 
 use super::app;
 use crate::hotkeys;
-use crate::settings::{FolderShortcut, Settings, UI_SCALES, ui_scale_stop};
+use crate::settings::{Settings, UI_SCALES, ui_scale_stop};
 use crate::{log, timefmt};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -25,21 +25,6 @@ const FONTS: &[f64] = &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0];
 const ZSTD: &[(i32, &str)] = &[(3, "Fast (zstd 3)"), (9, "Balanced (zstd 9)"), (19, "Smallest (zstd 19)")];
 const KEEP: &[(u32, &str)] = &[(0, "Forever"), (365, "1 year"), (180, "6 months"), (90, "90 days"), (30, "30 days")];
 
-/// Folder shortcut rows shown before the list scrolls.
-const ROWS_SHOWN: usize = 4;
-/// Tags of a folder shortcut row's controls: + the row's index.
-const ROW_SET: isize = 1000;
-const ROW_REMOVE: isize = 2000;
-const ROW_FOLDER: isize = 3000;
-
-/// A folder shortcut row: folder popup and shortcut field.
-struct Row {
-    folder: Retained<NSPopUpButton>,
-    hotkey: Retained<NSTextField>,
-    /// The folder path of each popup item.
-    paths: Vec<String>,
-}
-
 struct Prefs {
     window: Retained<NSWindow>,
     /// The page of each tab.
@@ -47,7 +32,8 @@ struct Prefs {
     hotkey: Retained<NSTextField>,
     folder_hotkey: Retained<NSTextField>,
     prefs_hotkey: Retained<NSTextField>,
-    shortcut_rows: Vec<Row>,
+    /// Preferences › Snippets: folders and snippets.
+    editor: Retained<super::snippets::Editor>,
     open_at: Retained<NSPopUpButton>,
     login: Retained<NSButton>,
     move_top: Retained<NSButton>,
@@ -231,6 +217,12 @@ pub fn snapshot(out: &str) {
     if let Some(i) = std::env::var("CRABCLIP_SNAPSHOT_TAB").ok().and_then(|t| TABS.iter().position(|(id, ..)| *id == t)) {
         show_tab(i);
     }
+    // CRABCLIP_SNAPSHOT_ROW: the snippet editor's row selected, folders open.
+    if let Some(row) = std::env::var("CRABCLIP_SNAPSHOT_ROW").ok().and_then(|r| r.parse().ok()) {
+        if let Some(ed) = PREFS.with(|p| p.borrow().as_ref().map(|p| p.editor.clone())) {
+            ed.snapshot_select(row);
+        }
+    }
     window.setFrameTopLeftPoint(NSPoint::new(-30000.0, -30000.0));
     window.orderFrontRegardless();
     objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.8));
@@ -245,6 +237,7 @@ pub fn snapshot(out: &str) {
 fn fill(window: &NSWindow) {
     // A field being typed in sends its action now, before the form is read.
     window.makeFirstResponder(None);
+    save_snippet_edits();
     let a = app();
     let mtm = a.mtm;
     let s = a.settings.borrow().clone();
@@ -340,12 +333,8 @@ fn fill(window: &NSWindow) {
     let mut f = Form { mtm, view: &snippets, y: PAGE_TOP, target };
     let folder_hotkey = f.hotkey("Show folders with:", &s.folder_hotkey, "none: type / in the history", 106);
     f.note(hotkey_note);
-    f.label("Folder shortcuts:");
-    let shortcut_rows = folder_rows(&mut f, &s);
-    f.button(216.0, 80.0, "+ Add", 107);
-    f.inline_label(304.0, 300.0, "Opens the history straight into that folder.");
-    f.y -= 30.0;
-    f.note("⌘L in the history files a clip in folders (type / there for the list of them); / in its search browses them.");
+    let (editor, y) = super::snippets::build(mtm, &snippets, f.y, PAGE_W);
+    f.y = y;
     trim(&snippets, f.y);
 
     // Import
@@ -371,7 +360,7 @@ fn fill(window: &NSWindow) {
             hotkey,
             folder_hotkey,
             prefs_hotkey,
-            shortcut_rows,
+            editor,
             open_at,
             login,
             move_top,
@@ -457,74 +446,12 @@ fn show_tab(i: usize) {
     let w = PREFS.with(|p| p.borrow().as_ref().map(|p| (p.window.clone(), p.tabs[i].clone())));
     let Some((w, page)) = w else { return };
     w.makeFirstResponder(None); // a field being typed in applies first
+    save_snippet_edits();
     if let Some(tb) = w.toolbar() {
         tb.setSelectedItemIdentifier(Some(&ns(TABS[i].0)));
     }
     w.setTitle(&ns(TABS[i].1));
     set_content(&w, &page);
-}
-
-/// The folder shortcut rows: folder popup, shortcut, Set, −. Past
-/// `ROWS_SHOWN` they scroll.
-fn folder_rows(f: &mut Form, s: &crate::settings::Settings) -> Vec<Row> {
-    let a = app();
-    let n = s.folder_shortcuts.len();
-    if n == 0 {
-        f.inline_label(220.0, 330.0, "None yet.");
-        f.y -= 30.0;
-        return Vec::new();
-    }
-    let all: Vec<String> = a.db.all_folder_paths().unwrap_or_default().into_iter().map(|(p, _)| p).collect();
-    let shown = n.min(ROWS_SHOWN) as f64 * 30.0;
-    let doc_h = n as f64 * 30.0;
-    let doc = NSView::initWithFrame(NSView::alloc(f.mtm), rect(0.0, 0.0, 440.0, doc_h));
-    let mut rf = Form { mtm: f.mtm, view: &doc, y: doc_h - 27.0, target: f.target };
-    let mut rows = Vec::new();
-    for (i, fs) in s.folder_shortcuts.iter().enumerate() {
-        let tag = i as isize;
-        // Folders are matched like everywhere else: by path, any case.
-        let mut paths = all.clone();
-        let mut titles = all.clone();
-        let idx = match all.iter().position(|p| p.to_lowercase() == fs.folder.to_lowercase()) {
-            Some(idx) => idx,
-            None => {
-                paths.insert(0, fs.folder.clone());
-                titles.insert(0, format!("{} (missing)", fs.folder));
-                0
-            }
-        };
-        let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(f.mtm), rect(4.0, rf.y, 170.0, 26.0), false);
-        for t in &titles {
-            popup.addItemWithTitle(&ns(t));
-        }
-        popup.selectItemAtIndex(idx as isize);
-        popup.setTag(ROW_FOLDER + tag);
-        unsafe {
-            popup.setTarget(Some(f.target));
-            popup.setAction(Some(sel!(prefAction:)));
-        }
-        doc.addSubview(&popup);
-        let field = rf.field(180.0, 140.0, &fs.hotkey);
-        field.setPlaceholderString(Some(&ns("shortcut")));
-        unsafe {
-            field.setAction(Some(sel!(prefAction:)));
-        }
-        field.setTag(ROW_SET + tag);
-        rf.button(324.0, 70.0, "Set", ROW_SET + tag);
-        rf.button(396.0, 40.0, "−", ROW_REMOVE + tag);
-        rf.y -= 30.0;
-        rows.push(Row { folder: popup, hotkey: field, paths });
-    }
-    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(f.mtm), rect(216.0, f.y + 27.0 - shown, 440.0, shown));
-    scroll.setDrawsBackground(false);
-    scroll.setHasVerticalScroller(n > ROWS_SHOWN);
-    scroll.setAutohidesScrollers(true);
-    scroll.setDocumentView(Some(&doc));
-    // Not flipped: start at the first row, on top.
-    doc.scrollPoint(NSPoint::new(0.0, doc_h));
-    f.view.addSubview(&scroll);
-    f.y -= shown;
-    rows
 }
 
 /// Put the form in the window, keeping its top left; on a screen too short
@@ -553,6 +480,14 @@ fn set_content(window: &NSWindow, view: &NSView) {
     }
 }
 
+/// A snippet being edited is kept before the editor goes or hides.
+fn save_snippet_edits() {
+    let ed = PREFS.with(|p| p.borrow().as_ref().map(|p| p.editor.clone()));
+    if let Some(ed) = ed {
+        ed.save_edits();
+    }
+}
+
 /// Front and key even though crabclip is an accessory app that is usually not
 /// active (the history panel never activates it).
 fn bring_forward(w: &NSWindow) {
@@ -571,6 +506,7 @@ pub fn closing(n: &NSNotification) {
         })
     });
     if is_prefs {
+        save_snippet_edits();
         dispatch2::DispatchQueue::main().exec_async(|| {
             let a = app();
             if a.ui().panel.isVisible() {
@@ -732,44 +668,6 @@ pub fn action(sender: Option<&AnyObject>) {
                 _ => s.prefs_hotkey = text.clone(),
             });
         }
-        107 => {
-            end_editing();
-            add_folder_shortcut();
-        }
-        t if (ROW_SET..ROW_SET + 1000).contains(&t) => {
-            let i = (t - ROW_SET) as usize;
-            let text = PREFS.with(|p| p.borrow().as_ref().and_then(|p| p.shortcut_rows.get(i).map(|r| r.hotkey.stringValue().to_string())));
-            let Some(text) = text.map(|t| hotkeys::join(&hotkeys::split(&t))) else { return };
-            set_hotkeys(&text, |s| {
-                if let Some(f) = s.folder_shortcuts.get_mut(i) {
-                    f.hotkey = text.clone();
-                }
-            });
-        }
-        t if (ROW_FOLDER..ROW_FOLDER + 1000).contains(&t) => {
-            let i = (t - ROW_FOLDER) as usize;
-            let path = PREFS.with(|p| {
-                let p = p.borrow();
-                let r = p.as_ref()?.shortcut_rows.get(i)?;
-                r.paths.get(r.folder.indexOfSelectedItem().max(0) as usize).cloned()
-            });
-            let Some(path) = path else { return };
-            set_hotkeys("", |s| {
-                if let Some(f) = s.folder_shortcuts.get_mut(i) {
-                    f.folder = path.clone();
-                }
-            });
-        }
-        t if (ROW_REMOVE..ROW_REMOVE + 1000).contains(&t) => {
-            let i = (t - ROW_REMOVE) as usize;
-            end_editing(); // a row being typed in keeps its index till then
-            set_hotkeys("", |s| {
-                if i < s.folder_shortcuts.len() {
-                    s.folder_shortcuts.remove(i);
-                }
-            });
-            refill();
-        }
         105 => import_clipy(),
         102 => {
             let url = NSURL::fileURLWithPath(&ns(&crate::db::Db::default_path().display().to_string()));
@@ -791,7 +689,7 @@ pub fn action(sender: Option<&AnyObject>) {
 /// Change shortcut settings: checked (syntax, used twice), registered and
 /// saved. If one of `typed` can't be had the change is undone and the alert
 /// says why. The fields show the settings afterwards either way.
-fn set_hotkeys(typed: &str, edit: impl FnOnce(&mut Settings)) {
+pub(super) fn set_hotkeys(typed: &str, edit: impl FnOnce(&mut Settings)) {
     let a = app();
     let old = a.settings.borrow().clone();
     let mut new = old.clone();
@@ -839,12 +737,6 @@ fn sync_hotkeys() {
         p.hotkey.setStringValue(&ns(&s.hotkey));
         p.folder_hotkey.setStringValue(&ns(&s.folder_hotkey));
         p.prefs_hotkey.setStringValue(&ns(&s.prefs_hotkey));
-        for (r, f) in p.shortcut_rows.iter().zip(&s.folder_shortcuts) {
-            r.hotkey.setStringValue(&ns(&f.hotkey));
-            if let Some(i) = r.paths.iter().position(|x| x.to_lowercase() == f.folder.to_lowercase()) {
-                r.folder.selectItemAtIndex(i as isize);
-            }
-        }
     });
 }
 
@@ -867,34 +759,6 @@ fn refill() {
     });
 }
 
-/// + Add: a row for the first folder that has no shortcut yet, its field
-/// ready to type in.
-fn add_folder_shortcut() {
-    let a = app();
-    let all: Vec<String> = a.db.all_folder_paths().unwrap_or_default().into_iter().map(|(p, _)| p).collect();
-    if all.is_empty() {
-        a.confirm("No folders yet", "File a clip in a folder first (⌘L in the history, e.g. Clients/ssh).", "OK");
-        return;
-    }
-    let mut s = a.settings.borrow().clone();
-    let has = |p: &String| s.folder_shortcuts.iter().any(|f| f.folder.to_lowercase() == p.to_lowercase());
-    let folder = all.iter().find(|p| !has(p)).unwrap_or(&all[0]).clone();
-    s.folder_shortcuts.push(FolderShortcut { folder, hotkey: String::new() });
-    s.save(&a.db);
-    *a.settings.borrow_mut() = s;
-    dispatch2::DispatchQueue::main().exec_async(|| {
-        let w = PREFS.with(|p| p.borrow().as_ref().map(|p| p.window.clone()));
-        let Some(w) = w else { return };
-        fill(&w);
-        PREFS.with(|p| {
-            if let Some(r) = p.borrow().as_ref().and_then(|p| p.shortcut_rows.last()) {
-                r.hotkey.scrollRectToVisible(r.hotkey.bounds());
-                w.makeFirstResponder(Some(&r.hotkey));
-            }
-        });
-    });
-}
-
 /// The preferences shortcut: brings them up, or closes them if they are in front.
 pub fn toggle() {
     let w = PREFS.with(|p| p.borrow().as_ref().map(|p| p.window.clone()));
@@ -911,7 +775,7 @@ pub fn reload_hotkeys() {
     let a = app();
     PREFS.with(|p| {
         if let Some(p) = p.borrow().as_ref() {
-            for f in [&p.hotkey, &p.folder_hotkey, &p.prefs_hotkey].into_iter().chain(p.shortcut_rows.iter().map(|r| &r.hotkey)) {
+            for f in [&p.hotkey, &p.folder_hotkey, &p.prefs_hotkey] {
                 f.abortEditing();
             }
         }

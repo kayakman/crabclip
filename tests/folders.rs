@@ -494,12 +494,13 @@ fn snippet_editor_operations() {
     db.set_snippet_title(general, b, "VPN").unwrap();
     db.move_snippet(general, notes, b).unwrap();
     assert_eq!(labels(&db.folder_entries(notes, "").unwrap()), vec!["VPN"]);
-    assert_eq!(db.folder_id("General").unwrap(), None, "left empty, the folder goes");
+    assert!(db.folder_id("General").unwrap().is_some(), "left empty in the editor, the folder stays");
     db.unfile(notes, b).unwrap();
-    assert_eq!(db.folder_id("Customers/Notes").unwrap(), None);
+    assert!(db.folder_id("Customers/Notes").unwrap().is_some());
     assert_eq!(db.clips_under(clients).unwrap(), vec![b]);
     db.delete_folder(clients).unwrap();
-    assert_eq!(db.folder_tree().unwrap(), vec![]);
+    let left: Vec<String> = db.folder_tree().unwrap().into_iter().map(|(_, _, n)| n).collect();
+    assert_eq!(left, vec!["General"], "Customers and all below it went");
     assert_eq!(db.count().unwrap(), n - 1, "clips stay in the history");
     assert!(db.detail(b).unwrap().unwrap().folders.is_empty());
     assert!(db.snippet_ts().unwrap() < 1);
@@ -534,7 +535,7 @@ fn drag_and_drop_order() {
     assert_eq!(labels(&db.folder_entries(0, "").unwrap()), vec!["B/ (1)", "A/ (2)"]);
     assert!(db.place_folder(b, c, 0).is_err(), "not inside itself");
     assert_eq!(db.place_folder(c, a, 0).unwrap(), "A/C");
-    assert_eq!(db.folder_id("B").unwrap(), None, "left empty, B goes");
+    assert!(db.folder_id("B").unwrap().is_some(), "left empty in the editor, B stays");
     assert_eq!(search(&db, "A/C").len(), 2, "clips are found by the new path");
     db.new_folder(0, "C").unwrap();
     assert!(db.place_folder(c, 0, 0).is_err(), "a C is already at the top");

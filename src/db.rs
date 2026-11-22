@@ -1371,7 +1371,6 @@ impl Db {
     pub fn delete_folder(&self, id: i64) -> Result<()> {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
         let clips = Self::clips_below(&tx, id)?;
-        let parent: i64 = tx.query_row("SELECT parent FROM folders WHERE id=?", [id], |r| r.get(0))?;
         tx.execute(
             "WITH RECURSIVE sub(id) AS (SELECT ?1 UNION SELECT f.id FROM folders f JOIN sub ON f.parent=sub.id) \
              DELETE FROM snippets WHERE folder_id IN sub",
@@ -1382,18 +1381,17 @@ impl Db {
              DELETE FROM folders WHERE id IN sub",
             [id],
         )?;
-        Self::prune_folder(&tx, parent)?;
         for clip in clips {
             Self::reindex(&tx, clip)?;
         }
         tx.commit()
     }
 
-    /// Take a clip out of a folder (left empty, the folder goes).
+    /// Take a clip out of a folder. The editor's operations leave folders
+    /// in place even when empty: they are managed there.
     pub fn unfile(&self, folder: i64, clip: i64) -> Result<()> {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM snippets WHERE folder_id=? AND clip_id=?", params![folder, clip])?;
-        Self::prune_folder(&tx, folder)?;
         Self::reindex(&tx, clip)?;
         tx.commit()
     }
@@ -1415,7 +1413,6 @@ impl Db {
             params![to, clip, title],
         )?;
         tx.execute("DELETE FROM snippets WHERE folder_id=? AND clip_id=?", params![from, clip])?;
-        Self::prune_folder(&tx, from)?;
         Self::reindex(&tx, clip)?;
         tx.commit()
     }
@@ -1437,7 +1434,6 @@ impl Db {
         if from != to {
             tx.execute("INSERT OR IGNORE INTO snippets(folder_id, clip_id, title) VALUES(?, ?, ?)", params![to, clip, title])?;
             tx.execute("DELETE FROM snippets WHERE folder_id=? AND clip_id=?", params![from, clip])?;
-            Self::prune_folder(&tx, from)?;
         }
         for (pos, c) in order.iter().enumerate() {
             tx.execute("UPDATE snippets SET pos=? WHERE folder_id=? AND clip_id=?", params![pos as i64, to, c])?;
@@ -1480,7 +1476,6 @@ impl Db {
             tx.execute("UPDATE folders SET pos=? WHERE id=?", params![pos as i64, f]).map_err(e)?;
         }
         if old_parent != parent {
-            Self::prune_folder(&tx, old_parent).map_err(e)?;
             // Its clips are found by folder paths, which changed.
             for clip in Self::clips_below(&tx, id).map_err(e)? {
                 Self::reindex(&tx, clip).map_err(e)?;

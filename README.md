@@ -60,17 +60,26 @@ level, ↑ ↓ move, → opens the selected folder (the search becomes
 folder. While a folder is selected the right pane shows what it holds; on a
 snippet it shows the value and ⏎ copies it like any clip. Filed clips
 are never pruned, like starred ones; a folder goes away when its last clip
-leaves it.
+leaves it through ⌘L or a delete.
+
+Snippet editor (Preferences › Snippets), like Clipy's: folders and snippets in
+a tree. Select a snippet to edit its title and text (moving to another row or
+Save, ⌘S, keeps the changes; the text is that clip's, in the history too); a
+folder to rename it or set its shortcut. "+ Folder" adds one inside the folder
+selected, "+ Snippet" writes a new one in it, − takes a snippet out of its
+folder (the clip stays in the history) or deletes a folder with the folders in
+it. Drag snippets and folders to reorder them or move them into another
+folder. Folders made or emptied here stay until deleted.
 
 Global shortcuts (Preferences › General and › Snippets): "Show history with",
 "Show folders with" and "Show preferences with" take one shortcut or several
 separated by commas (`alt+shift+cmd+v, ctrl+shift+cmd+v`), in global-hotkey
 syntax: modifiers `cmd`, `alt`, `ctrl`, `shift` and a key (`v`, `1`, `Space`,
-`F5`, `Comma`, `ArrowUp`…). Folder shortcuts (Preferences › Snippets) open the
-history straight into one folder: "+ Add" a row, pick the folder (nested ones
-too) and set its shortcut; − removes it. A folder is remembered by its path: if
-it goes away (its last clip left, or its clips moved to another name), the row
-shows it as missing and the shortcut opens its nearest parent still there, or
+`F5`, `Comma`, `ArrowUp`…). A folder's shortcut (set on the folder in the
+snippet editor) opens the history straight into it. Renamed or moved in the
+editor, the folder keeps its shortcut; deleted, the shortcut goes. A folder that
+goes away otherwise (its last clip left through ⌘L) keeps its shortcut, listed
+under the editor to remove it, which opens its nearest parent still there, or
 the top level, until a folder with that path is back. The same shortcut can't
 open two things.
 
@@ -101,8 +110,8 @@ at login, ⏎ behavior, Accessibility), Appearance (where the window opens, row
 and text size, and an interface size slider, 70–125% in 5% steps below 100%,
 that zooms the whole window: text, rows, icons and the window itself), History
 (how long clips are kept, ignored apps, text in images, image size and
-compression, the database), Snippets (the folders shortcut and folder
-shortcuts) and Import (Clipy, Collective). It opens on the tab used last.
+compression, the database), Snippets (the folders shortcut and the snippet
+editor) and Import (Clipy, Collective). It opens on the tab used last.
 
 ## Install
 

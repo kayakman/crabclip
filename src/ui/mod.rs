@@ -6,6 +6,7 @@ pub mod classes;
 mod draw;
 pub mod folders;
 pub mod prefs;
+mod snippets;
 
 use crate::db::{Db, Detail, Filter, Kind, RowInfo};
 use crate::hotkeys::{self, Action};
