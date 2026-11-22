@@ -418,3 +418,89 @@ fn imports_clipy_shortcuts() {
     assert_eq!(Settings::load(&db), Settings::default());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn snippet_editor_operations() {
+    use crabclip::settings::FolderShortcut;
+    let db = Db::open_memory().unwrap();
+    let s = Settings::default();
+    let a = insert(&db, 1, "ssh deploy@prod.example.com");
+    let b = insert(&db, 2, "VPN secret thing");
+    db.set_folders(a, &["Clients/Formosa".into()]).unwrap();
+    db.set_folders(b, &["Clients/Formosa".into(), "General".into()]).unwrap();
+    let clients = db.folder_id("Clients").unwrap().unwrap();
+    let formosa = db.folder_id("Clients/Formosa").unwrap().unwrap();
+    let general = db.folder_id("General").unwrap().unwrap();
+
+    // New folders: empty ones stay; names are checked.
+    let notes = db.new_folder(clients, "  Notes  ").unwrap();
+    assert_eq!(db.folder_path(notes).unwrap(), "Clients/Notes");
+    assert!(db.new_folder(clients, "notes").is_err(), "same name, any case");
+    assert!(db.new_folder(0, "a/b").is_err());
+    assert!(db.new_folder(0, "   ").is_err());
+    let tree: Vec<String> = db.folder_tree().unwrap().into_iter().map(|(_, _, n)| n).collect();
+    assert_eq!(tree, vec!["Clients", "Formosa", "General", "Notes"], "by place among siblings, then name");
+
+    // Rename where it is: what it holds goes along, and is found by the new name.
+    assert_eq!(db.rename_folder(clients, "Customers").unwrap(), "Customers");
+    assert_eq!(db.folder_path(formosa).unwrap(), "Customers/Formosa");
+    assert_eq!(search(&db, "customers"), vec![b, a]);
+    assert!(search(&db, "clients").is_empty());
+    assert!(db.rename_folder(formosa, "notes").is_err(), "a sibling has that name");
+    assert_eq!(db.rename_folder(formosa, "FORMOSA").unwrap(), "Customers/FORMOSA", "same folder, new case");
+
+    // Folder shortcuts follow a rename and go with a delete.
+    let mut st = Settings {
+        folder_shortcuts: vec![
+            FolderShortcut { folder: "clients/formosa".into(), hotkey: "cmd+1".into() },
+            FolderShortcut { folder: "Clients".into(), hotkey: "cmd+2".into() },
+            FolderShortcut { folder: "ClientsOld".into(), hotkey: "cmd+3".into() },
+        ],
+        ..Settings::default()
+    };
+    assert!(st.folder_renamed("Clients", "Customers"));
+    let paths: Vec<&str> = st.folder_shortcuts.iter().map(|f| f.folder.as_str()).collect();
+    assert_eq!(paths, vec!["Customers/formosa", "Customers", "ClientsOld"], "not a folder that only starts the same");
+    assert!(st.folder_deleted("customers"));
+    assert_eq!(st.folder_shortcuts.len(), 1);
+    assert!(!st.folder_deleted("Nowhere"));
+
+    // Titles: set, cleared (shows the text again).
+    db.set_snippet_title(formosa, a, " Deploy ").unwrap();
+    assert_eq!(db.snippet_title(formosa, a).unwrap(), "Deploy");
+    assert_eq!(labels(&db.folder_entries(formosa, "").unwrap()), vec!["Deploy", "VPN secret thing"]);
+    db.set_snippet_title(formosa, a, "").unwrap();
+    assert_eq!(labels(&db.folder_entries(formosa, "").unwrap()), vec!["ssh deploy@prod.example.com", "VPN secret thing"]);
+
+    // Edit the text in place: same clip, folders and title kept, found by the new text.
+    db.set_snippet_title(formosa, a, "Deploy").unwrap();
+    let cap = |text: &str| crabclip::ingest::build(
+        Capture { ts: 9, reps: vec![Rep { item: 0, uti: "public.utf8-plain-text".into(), data: text.as_bytes().to_vec() }], ..Default::default() },
+        &s,
+    )
+    .unwrap();
+    assert_eq!(db.set_text(a, &cap("ssh deploy@staging.example.com"), 3).unwrap(), a);
+    assert_eq!(search(&db, "staging"), vec![a]);
+    assert!(search(&db, "prod.example").is_empty());
+    assert_eq!(db.snippet_title(formosa, a).unwrap(), "Deploy");
+    assert_eq!(String::from_utf8(db.reps(a).unwrap()[0].data.clone()).unwrap(), "ssh deploy@staging.example.com");
+    // Edited to a text another clip has: that one takes its place.
+    let n = db.count().unwrap();
+    assert_eq!(db.set_text(a, &cap("VPN secret thing"), 3).unwrap(), b);
+    assert_eq!(db.count().unwrap(), n - 1);
+    assert_eq!(labels(&db.folder_entries(formosa, "").unwrap()), vec!["VPN secret thing"], "b was already there");
+
+    // Move keeps the title; unfile and delete_folder keep the clip in the history.
+    db.set_snippet_title(general, b, "VPN").unwrap();
+    db.move_snippet(general, notes, b).unwrap();
+    assert_eq!(labels(&db.folder_entries(notes, "").unwrap()), vec!["VPN"]);
+    assert_eq!(db.folder_id("General").unwrap(), None, "left empty, the folder goes");
+    db.unfile(notes, b).unwrap();
+    assert_eq!(db.folder_id("Customers/Notes").unwrap(), None);
+    assert_eq!(db.clips_under(clients).unwrap(), vec![b]);
+    db.delete_folder(clients).unwrap();
+    assert_eq!(db.folder_tree().unwrap(), vec![]);
+    assert_eq!(db.count().unwrap(), n - 1, "clips stay in the history");
+    assert!(db.detail(b).unwrap().unwrap().folders.is_empty());
+    assert!(db.snippet_ts().unwrap() < 1);
+}

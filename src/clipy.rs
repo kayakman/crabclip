@@ -226,11 +226,7 @@ fn import_xml(xml: &str, db: &Db, settings: &Settings) -> Result<Stats, String> 
 /// crowd the top of the history (a snippet already in it keeps its date).
 fn add_snippets(folders: Vec<Folder>, db: &Db, settings: &Settings, st: &mut Stats) -> Result<(), String> {
     let e = |e: rusqlite::Error| e.to_string();
-    let oldest: Option<i64> = db
-        .conn
-        .query_row("SELECT MIN(created_at) FROM clips WHERE id NOT IN (SELECT clip_id FROM snippets)", [], |r| r.get(0))
-        .map_err(e)?;
-    let ts = oldest.unwrap_or_else(crate::timefmt::now_ms) - 60_000;
+    let ts = db.snippet_ts().map_err(e)?;
     let app = AppInfo {
         bundle: Some(BUNDLE.into()),
         name: Some("Clipy".into()),

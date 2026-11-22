@@ -103,6 +103,15 @@ fn b(v: bool) -> String {
     if v { "1".into() } else { "0".into() }
 }
 
+/// `path` is `folder` or a folder below it (any case): the rest of it
+/// ("" or "/Sub").
+fn below<'a>(path: &'a str, folder: &str) -> Option<&'a str> {
+    let n = folder.len();
+    let head = path.get(..n)?;
+    let rest = &path[n..];
+    (head.to_lowercase() == folder.to_lowercase() && (rest.is_empty() || rest.starts_with('/'))).then_some(rest)
+}
+
 /// One shortcut a line: "hotkey<TAB>folder path".
 fn folder_shortcuts_to_string(list: &[FolderShortcut]) -> String {
     list.iter().map(|f| format!("{}\t{}", f.hotkey.trim(), f.folder.trim())).collect::<Vec<_>>().join("\n")
@@ -150,6 +159,27 @@ impl Settings {
             pinned: flag("pinned", d.pinned),
             star_filter: flag("star_filter", d.star_filter),
         }
+    }
+
+    /// A folder was renamed (or moved) from path `old` to `new`: shortcuts to
+    /// it and to folders below it follow. True if any did.
+    pub fn folder_renamed(&mut self, old: &str, new: &str) -> bool {
+        let mut changed = false;
+        for f in &mut self.folder_shortcuts {
+            if let Some(rest) = below(&f.folder, old) {
+                f.folder = format!("{new}{rest}");
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// A folder was deleted: shortcuts to it and to folders below it go.
+    /// True if any did.
+    pub fn folder_deleted(&mut self, path: &str) -> bool {
+        let n = self.folder_shortcuts.len();
+        self.folder_shortcuts.retain(|f| below(&f.folder, path).is_none());
+        n != self.folder_shortcuts.len()
     }
 
     pub fn save(&self, db: &Db) {
