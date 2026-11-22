@@ -504,3 +504,38 @@ fn snippet_editor_operations() {
     assert!(db.detail(b).unwrap().unwrap().folders.is_empty());
     assert!(db.snippet_ts().unwrap() < 1);
 }
+
+#[test]
+fn drag_and_drop_order() {
+    let db = Db::open_memory().unwrap();
+    let ids: Vec<i64> = ["one", "two", "three"].iter().enumerate().map(|(i, t)| insert(&db, i as i64 + 1, t)).collect();
+    for id in &ids {
+        db.set_folders(*id, &["A".into()]).unwrap();
+    }
+    let x = insert(&db, 9, "elsewhere");
+    db.set_folders(x, &["B/C".into()]).unwrap();
+    let a = db.folder_id("A").unwrap().unwrap();
+    let b = db.folder_id("B").unwrap().unwrap();
+    let c = db.folder_id("B/C").unwrap().unwrap();
+    db.set_snippet_title(a, ids[2], "Third").unwrap();
+
+    // Reorder within a folder.
+    db.place_snippet(ids[2], a, a, 0).unwrap();
+    assert_eq!(labels(&db.folder_entries(a, "").unwrap()), vec!["Third", "one", "two"]);
+    db.place_snippet(ids[2], a, a, 99).unwrap();
+    assert_eq!(labels(&db.folder_entries(a, "").unwrap()), vec!["one", "two", "Third"]);
+    // Into another folder at a place, title kept.
+    db.place_snippet(ids[2], a, c, 0).unwrap();
+    assert_eq!(labels(&db.folder_entries(c, "").unwrap()), vec!["Third", "elsewhere"]);
+    assert_eq!(labels(&db.folder_entries(a, "").unwrap()), vec!["one", "two"]);
+
+    // Folders: reorder at the top level, move into another, never into itself.
+    db.place_folder(b, 0, 0).unwrap();
+    assert_eq!(labels(&db.folder_entries(0, "").unwrap()), vec!["B/ (1)", "A/ (2)"]);
+    assert!(db.place_folder(b, c, 0).is_err(), "not inside itself");
+    assert_eq!(db.place_folder(c, a, 0).unwrap(), "A/C");
+    assert_eq!(db.folder_id("B").unwrap(), None, "left empty, B goes");
+    assert_eq!(search(&db, "A/C").len(), 2, "clips are found by the new path");
+    db.new_folder(0, "C").unwrap();
+    assert!(db.place_folder(c, 0, 0).is_err(), "a C is already at the top");
+}

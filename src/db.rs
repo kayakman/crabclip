@@ -1420,6 +1420,76 @@ impl Db {
         tx.commit()
     }
 
+    /// Put a clip at `index` among the snippets of folder `to` (dragged
+    /// there), taking it out of `from` if that is another folder. Its title
+    /// goes along.
+    pub fn place_snippet(&self, clip: i64, from: i64, to: i64, index: usize) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        let title: String = tx
+            .query_row("SELECT title FROM snippets WHERE folder_id=? AND clip_id=?", params![from, clip], |r| r.get(0))
+            .optional()?
+            .unwrap_or_default();
+        let mut order: Vec<i64> = {
+            let mut st = tx.prepare("SELECT clip_id FROM snippets WHERE folder_id=? AND clip_id<>? ORDER BY pos")?;
+            st.query_map(params![to, clip], |r| r.get(0))?.collect::<Result<_>>()?
+        };
+        order.insert(index.min(order.len()), clip);
+        if from != to {
+            tx.execute("INSERT OR IGNORE INTO snippets(folder_id, clip_id, title) VALUES(?, ?, ?)", params![to, clip, title])?;
+            tx.execute("DELETE FROM snippets WHERE folder_id=? AND clip_id=?", params![from, clip])?;
+            Self::prune_folder(&tx, from)?;
+        }
+        for (pos, c) in order.iter().enumerate() {
+            tx.execute("UPDATE snippets SET pos=? WHERE folder_id=? AND clip_id=?", params![pos as i64, to, c])?;
+        }
+        Self::reindex(&tx, clip)?;
+        tx.commit()
+    }
+
+    /// Put folder `id` at `index` among the folders in `parent` (0: the top
+    /// level), with what it holds. Returns its new path.
+    pub fn place_folder(&self, id: i64, parent: i64, index: usize) -> std::result::Result<String, String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        // Not into itself or a folder below it.
+        let mut p = parent;
+        while p != 0 {
+            if p == id {
+                return Err("A folder can't go inside itself.".into());
+            }
+            p = self.conn.query_row("SELECT parent FROM folders WHERE id=?", [p], |r| r.get(0)).map_err(e)?;
+        }
+        let (old_parent, name): (i64, String) =
+            self.conn.query_row("SELECT parent, name FROM folders WHERE id=?", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(e)?;
+        if old_parent != parent {
+            let taken: bool = self
+                .conn
+                .query_row("SELECT EXISTS(SELECT 1 FROM folders WHERE parent=? AND name=?)", params![parent, name], |r| r.get(0))
+                .map_err(e)?;
+            if taken {
+                return Err(format!("There is already a folder named {name} there."));
+            }
+        }
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate).map_err(e)?;
+        let mut order: Vec<i64> = {
+            let mut st = tx.prepare("SELECT id FROM folders WHERE parent=? AND id<>? ORDER BY pos, name").map_err(e)?;
+            st.query_map(params![parent, id], |r| r.get(0)).map_err(e)?.collect::<Result<_>>().map_err(e)?
+        };
+        order.insert(index.min(order.len()), id);
+        tx.execute("UPDATE folders SET parent=? WHERE id=?", params![parent, id]).map_err(e)?;
+        for (pos, f) in order.iter().enumerate() {
+            tx.execute("UPDATE folders SET pos=? WHERE id=?", params![pos as i64, f]).map_err(e)?;
+        }
+        if old_parent != parent {
+            Self::prune_folder(&tx, old_parent).map_err(e)?;
+            // Its clips are found by folder paths, which changed.
+            for clip in Self::clips_below(&tx, id).map_err(e)? {
+                Self::reindex(&tx, clip).map_err(e)?;
+            }
+        }
+        tx.commit().map_err(e)?;
+        self.folder_path(id).map_err(e)
+    }
+
     /// A snippet's own title in a folder ("" when it shows its text).
     pub fn snippet_title(&self, folder: i64, clip: i64) -> Result<String> {
         self.conn
